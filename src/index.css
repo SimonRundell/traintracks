@@ -1,0 +1,152 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  font: 16px/1.4 system-ui, 'Segoe UI', Roboto, sans-serif;
+  background: #202531;
+}
+
+.railway-app {
+  width: 100vw;
+  height: 100vh;
+}
+
+.railway-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.train-control-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 40px;
+  padding: 14px 24px;
+  background: rgba(16, 18, 24, 0.82);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  user-select: none;
+  touch-action: none;
+}
+
+.control-label {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #9ca3af;
+}
+
+.control-value {
+  font-family: ui-monospace, 'Courier New', monospace;
+  font-size: 13px;
+  color: #e5e7eb;
+}
+
+.throttle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.throttle-dial {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #4a4f5c, #1c1f26 70%);
+  border: 2px solid #0b0d12;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.5),
+    inset 0 1px 2px rgba(255, 255, 255, 0.08);
+  cursor: grab;
+}
+
+.throttle-dial:active {
+  cursor: grabbing;
+}
+
+.throttle-dial:focus-visible {
+  outline: 2px solid #e8b339;
+  outline-offset: 3px;
+}
+
+.throttle-dial-pointer {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: 3px;
+  height: 24px;
+  margin-left: -1.5px;
+  background: #e8b339;
+  border-radius: 2px;
+  transform-origin: 50% 28px;
+}
+
+.direction-switch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.direction-switch-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.direction-switch-tick {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: #9ca3af;
+}
+
+.direction-switch-track {
+  position: relative;
+  width: 40px;
+  height: 76px;
+  padding: 0;
+  border-radius: 20px;
+  background: #1c1f26;
+  border: 2px solid #0b0d12;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
+.direction-switch-track:focus-visible {
+  outline: 2px solid #e8b339;
+  outline-offset: 3px;
+}
+
+.direction-switch-thumb {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: linear-gradient(160deg, #e8b339, #a9781f);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+  transition: top 0.15s ease;
+}
+
+.direction-switch-track[data-direction='reverse'] .direction-switch-thumb {
+  top: 41px;
+}
