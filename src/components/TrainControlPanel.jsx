@@ -80,8 +80,44 @@ function ThrottleDial({ value, onChange }) {
 }
 
 /**
- * Forward/reverse direction switch, styled as a two-position toggle with
- * forward at the top and reverse at the bottom.
+ * Generic two-position toggle switch: a labelled control with a track that
+ * slides between a top and bottom position. Used for both the direction and
+ * camera switches so they share one visual and interaction pattern.
+ *
+ * @param {Object} props
+ * @param {string} props.label Control label shown above the switch.
+ * @param {string} props.topText Tick label for the top (pressed) position.
+ * @param {string} props.bottomText Tick label for the bottom position.
+ * @param {boolean} props.isTop True when the switch is in its top position.
+ * @param {string} props.ariaLabel Accessible description of the current state and what activating it does.
+ * @param {() => void} props.onToggle Called when the switch is clicked.
+ * @returns {JSX.Element} The toggle switch control.
+ */
+function ToggleSwitch({ label, topText, bottomText, isTop, ariaLabel, onToggle }) {
+  return (
+    <div className="toggle-switch">
+      <span className="control-label">{label}</span>
+      <div className="toggle-switch-body">
+        <span className="toggle-switch-tick">{topText}</span>
+        <button
+          type="button"
+          className="toggle-switch-track"
+          data-position={isTop ? 'top' : 'bottom'}
+          aria-pressed={isTop}
+          aria-label={ariaLabel}
+          onClick={onToggle}
+        >
+          <span className="toggle-switch-thumb" />
+        </button>
+        <span className="toggle-switch-tick">{bottomText}</span>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Forward/reverse direction switch, with forward at the top and reverse at
+ * the bottom.
  *
  * @param {Object} props
  * @param {1 | -1} props.direction Current direction: 1 = forward, -1 = reverse.
@@ -90,40 +126,81 @@ function ThrottleDial({ value, onChange }) {
  */
 function DirectionSwitch({ direction, onChange }) {
   const isForward = direction === 1
-
   return (
-    <div className="direction-switch">
-      <span className="control-label">Direction</span>
-      <div className="direction-switch-body">
-        <span className="direction-switch-tick">FWD</span>
-        <button
-          type="button"
-          className="direction-switch-track"
-          data-direction={isForward ? 'forward' : 'reverse'}
-          aria-pressed={isForward}
-          aria-label={`Direction: ${isForward ? 'forward' : 'reverse'}. Activate to switch to ${isForward ? 'reverse' : 'forward'}.`}
-          onClick={() => onChange(isForward ? -1 : 1)}
-        >
-          <span className="direction-switch-thumb" />
-        </button>
-        <span className="direction-switch-tick">REV</span>
-      </div>
-    </div>
+    <ToggleSwitch
+      label="Direction"
+      topText="FWD"
+      bottomText="REV"
+      isTop={isForward}
+      ariaLabel={`Direction: ${isForward ? 'forward' : 'reverse'}. Activate to switch to ${isForward ? 'reverse' : 'forward'}.`}
+      onToggle={() => onChange(isForward ? -1 : 1)}
+    />
   )
 }
 
 /**
- * Bottom-of-screen controller for the running loco: a rotary throttle dial
- * and a forward/reverse switch. Mutates the shared controller state in
- * place so the render loop picks up changes immediately.
+ * Camera mode switch: STATIC leaves the camera wherever the user left it;
+ * FOLLOW keeps the orbit target on the lead loco while still allowing
+ * rotate and zoom.
  *
  * @param {Object} props
- * @param {import('../railway/trainController.js').TrainController} props.controller Shared throttle/direction state.
+ * @param {'static' | 'follow'} props.cameraMode Current camera mode.
+ * @param {(mode: 'static' | 'follow') => void} props.onChange Called with the new mode when toggled.
+ * @returns {JSX.Element} The camera switch control.
+ */
+function CameraSwitch({ cameraMode, onChange }) {
+  const isStatic = cameraMode === 'static'
+  return (
+    <ToggleSwitch
+      label="Camera"
+      topText="STATIC"
+      bottomText="FOLLOW"
+      isTop={isStatic}
+      ariaLabel={`Camera: ${isStatic ? 'static' : 'follow'}. Activate to switch to ${isStatic ? 'follow' : 'static'}.`}
+      onToggle={() => onChange(isStatic ? 'follow' : 'static')}
+    />
+  )
+}
+
+/**
+ * Sim mode switch: PLAY runs the train formation; LAY hides it and arms
+ * click-and-drag track building instead.
+ *
+ * @param {Object} props
+ * @param {'play' | 'lay'} props.mode Current sim mode.
+ * @param {(mode: 'play' | 'lay') => void} props.onChange Called with the new mode when toggled.
+ * @returns {JSX.Element} The mode switch control.
+ */
+function ModeSwitch({ mode, onChange }) {
+  const isPlay = mode === 'play'
+  return (
+    <ToggleSwitch
+      label="Mode"
+      topText="PLAY"
+      bottomText="LAY"
+      isTop={isPlay}
+      ariaLabel={`Mode: ${isPlay ? 'play' : 'lay track'}. Activate to switch to ${isPlay ? 'lay track' : 'play'}.`}
+      onToggle={() => onChange(isPlay ? 'lay' : 'play')}
+    />
+  )
+}
+
+/**
+ * Bottom-of-screen controller: a rotary throttle dial, a forward/reverse
+ * switch, a camera mode switch, and a play/lay mode switch. Mutates the
+ * shared controller state in place so the render loop picks up changes
+ * immediately. The throttle and direction controls dim in LAY mode, since
+ * the train is off the track while building.
+ *
+ * @param {Object} props
+ * @param {import('../railway/trainController.js').TrainController} props.controller Shared controller state.
  * @returns {JSX.Element} The control panel bar.
  */
 export default function TrainControlPanel({ controller }) {
   const [speedFraction, setSpeedFraction] = useState(controller.speedFraction)
   const [direction, setDirection] = useState(controller.direction)
+  const [cameraMode, setCameraMode] = useState(controller.cameraMode)
+  const [mode, setMode] = useState(controller.mode)
 
   const handleSpeedChange = useCallback(
     (value) => {
@@ -141,10 +218,30 @@ export default function TrainControlPanel({ controller }) {
     [controller],
   )
 
+  const handleCameraModeChange = useCallback(
+    (value) => {
+      controller.cameraMode = value
+      setCameraMode(value)
+    },
+    [controller],
+  )
+
+  const handleModeChange = useCallback(
+    (value) => {
+      controller.mode = value
+      setMode(value)
+    },
+    [controller],
+  )
+
   return (
     <div className="train-control-panel">
-      <ThrottleDial value={speedFraction} onChange={handleSpeedChange} />
-      <DirectionSwitch direction={direction} onChange={handleDirectionChange} />
+      <div className={mode === 'lay' ? 'train-controls-group inactive' : 'train-controls-group'}>
+        <ThrottleDial value={speedFraction} onChange={handleSpeedChange} />
+        <DirectionSwitch direction={direction} onChange={handleDirectionChange} />
+      </div>
+      <CameraSwitch cameraMode={cameraMode} onChange={handleCameraModeChange} />
+      <ModeSwitch mode={mode} onChange={handleModeChange} />
     </div>
   )
 }

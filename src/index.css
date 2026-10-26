@@ -33,7 +33,7 @@ body {
   right: 0;
   bottom: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: center;
   gap: 40px;
   padding: 14px 24px;
@@ -55,6 +55,17 @@ body {
   font-family: ui-monospace, 'Courier New', monospace;
   font-size: 13px;
   color: #e5e7eb;
+}
+
+.train-controls-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 40px;
+  transition: opacity 0.2s ease;
+}
+
+.train-controls-group.inactive {
+  opacity: 0.4;
 }
 
 .throttle {
@@ -98,27 +109,27 @@ body {
   transform-origin: 50% 28px;
 }
 
-.direction-switch {
+.toggle-switch {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
 }
 
-.direction-switch-body {
+.toggle-switch-body {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
 }
 
-.direction-switch-tick {
+.toggle-switch-tick {
   font-size: 10px;
   letter-spacing: 0.06em;
   color: #9ca3af;
 }
 
-.direction-switch-track {
+.toggle-switch-track {
   position: relative;
   width: 40px;
   height: 76px;
@@ -130,12 +141,12 @@ body {
   cursor: pointer;
 }
 
-.direction-switch-track:focus-visible {
+.toggle-switch-track:focus-visible {
   outline: 2px solid #e8b339;
   outline-offset: 3px;
 }
 
-.direction-switch-thumb {
+.toggle-switch-thumb {
   position: absolute;
   left: 3px;
   top: 3px;
@@ -147,6 +158,6 @@ body {
   transition: top 0.15s ease;
 }
 
-.direction-switch-track[data-direction='reverse'] .direction-switch-thumb {
+.toggle-switch-track[data-position='bottom'] .toggle-switch-thumb {
   top: 41px;
 }
