@@ -6,10 +6,13 @@ const SHAFT_LENGTH = 1.8
 const SHAFT_RADIUS = 0.18
 const HEAD_LENGTH = 1.2
 const HEAD_RADIUS = 0.55
-const INACTIVE_SCALE = 0.55 // the route not currently selected draws smaller, so it reads as background
+// Scale and material contrast between the two routes has to be large enough that a click's effect is
+// obvious at a glance — a toggle that only shifts things subtly reads as "did that even register?".
+const ACTIVE_SCALE = 1.2 // the selected route draws bigger than its own built size, not just bigger than the other one
+const INACTIVE_SCALE = 0.35 // the route not currently selected draws small enough to clearly recede
 const PICK_RADIUS = 1.8
 const ACTIVE_COLOR = 0xe8b339 // matches the control panel's amber accent
-const INACTIVE_COLOR = 0x5a5f6b // muted, so the active route is unmistakable at a glance
+const INACTIVE_COLOR = 0x3a3d45 // dark, close to the scene background, so the active route is unmistakable
 
 const LOCAL_FORWARD = new THREE.Vector3(1, 0, 0)
 
@@ -28,7 +31,7 @@ function getMaterials() {
     activeMaterial = new THREE.MeshStandardMaterial({
       color: ACTIVE_COLOR,
       emissive: ACTIVE_COLOR,
-      emissiveIntensity: 0.4,
+      emissiveIntensity: 0.9,
       roughness: 0.4,
       metalness: 0.1,
     })
@@ -39,7 +42,7 @@ function getMaterials() {
       roughness: 0.8,
       metalness: 0,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.4,
     })
   }
   if (!pickMaterial) {
@@ -136,7 +139,7 @@ export function placeJunctionArrow(junction) {
     const material = isActive ? activeMaterial : inactiveMaterial
     route.shaft.material = material
     route.head.material = material
-    route.yawGroup.scale.setScalar(isActive ? 1 : INACTIVE_SCALE)
+    route.yawGroup.scale.setScalar(isActive ? ACTIVE_SCALE : INACTIVE_SCALE)
   })
 }
 

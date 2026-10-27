@@ -71,13 +71,26 @@ export function stepPath(state, distance, junctions) {
         state.t = eventJunction.divertT
         state.direction = eventJunction.divertDirection
       } else {
-        // Dead end — the rest of this distance genuinely can't be covered,
-        // not just "consumed as a no-op". Report that directly rather than
-        // claiming the full distance was travelled, so the caller can keep
-        // its own notion of distance-travelled in sync with where the train
-        // actually is instead of letting it drift ahead of a train that's
-        // stopped.
-        return { consumed: distance - remaining }
+        // No diversion here — but an open piece's own end isn't necessarily a
+        // dead end. A plain link (see TrackPiece.links in trackBuilder.js)
+        // records an unconditional continuation onto whatever piece was
+        // built contiguously from here, with no switch to throw — e.g. two
+        // ordinary pieces laid end to end, or a standard piece chain like
+        // the starter oval.
+        const link = piece.links[state.direction > 0 ? 'end' : 'start']
+        if (link) {
+          state.piece = link.piece
+          state.t = link.end === 'start' ? 0 : 1
+          state.direction = link.end === 'start' ? 1 : -1
+        } else {
+          // A genuine dead end — the rest of this distance can't be covered,
+          // not just "consumed as a no-op". Report that directly rather than
+          // claiming the full distance was travelled, so the caller can keep
+          // its own notion of distance-travelled in sync with where the
+          // train actually is instead of letting it drift ahead of a train
+          // that's stopped.
+          return { consumed: distance - remaining }
+        }
       }
     }
   }

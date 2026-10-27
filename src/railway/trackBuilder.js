@@ -1,23 +1,35 @@
 import * as THREE from 'three'
-import { closestPointOnCurve, curveMinRadius, quadraticBezierMinRadius } from './curveMath.js'
+import { closestPointOnCurve } from './curveMath.js'
 import { buildTrackMeshes } from './track.js'
 import { createJunctionArrow, disposeSharedJunctionMaterials, placeJunctionArrow } from './junctionArrow.js'
+import { createDeadEndMarker, disposeSharedDeadEndMaterial } from './deadEndMarker.js'
+import { linkPieceEnds } from './trackGraph.js'
+import { freeCandidates, forkCandidates, closestCandidate } from './pieceCandidates.js'
+import { POINT_DIVERGE_ANGLE, Y_POINT_HALF_ANGLE } from './trackCatalogue.js'
 
-const MIN_CURVE_RADIUS = 15 // metres — anything tighter is rejected as too hard a curve to run a train on
-// Beyond 90°, the radius a given drag distance can achieve stops increasing monotonically with
-// distance (it's proportional to sin of the deflection angle, which turns back down past 90°) — so
-// without a hard cap here, a single drag could satisfy MIN_CURVE_RADIUS at every point while still
-// forming a tight hairpin overall. Even a per-point-valid hairpin is still far too sharp for a rigid
-// ~23m carriage body to follow without visibly cutting across itself, so sharper turns have to be
-// built as a sequence of more moderate segments instead of one extreme one.
-const MAX_DEFLECTION_ANGLE = Math.PI / 2 // 90°
-const MIN_SEGMENT_LENGTH = 2 // metres — shorter drags are discarded as stray clicks
-const SNAP_TOLERANCE = 4 // metres — how close a drag's end has to pass another piece to auto-connect to it
-const JUNCTION_SAMPLE_DISTANCE = 3 // metres along each route, used to find a direction the switch arrow can point along
+const MIN_DRAG_DISTANCE = 2 // metres — the cursor has to move at least this far from the start point for a drag to count as deliberate, not a stray click. Every catalogue piece is already far longer than this, so this gates intent, not the resulting piece's size.
+const SNAP_POSITION_TOLERANCE = 4 // metres — how close a piece's end has to land to another piece's curve to auto-join it, whether that lands it on a free end (a plain link) or mid-piece (a fork — see findConnection)
+const SNAP_ANGLE_TOLERANCE = THREE.MathUtils.degToRad(8) // how close to parallel (for a plain link) or to a real point/Y-point's diverge angle (for a fork) the two tangents have to be — catalogue pieces are rigid, so unlike the old free-form drag nothing ever bends to fit
+const MAGNET_RADIUS = 20 // metres — how far from the cursor to look for a landing spot worth actively aiming a candidate at, so rejoining existing track doesn't require pixel-perfect aim against a fixed-geometry piece
+// A junction's two routes start out coincident (or nearly so) right at the fork, so an arrow placed
+// there sits on top of both tracks at once with no way to tell which one is which. These constants
+// control how far out along each route to look instead: far enough that the routes' ballast beds
+// (each BALLAST_TOP_HALF_WIDTH * 2 wide in track.js, currently 3.8m) have visibly separated.
+const PARTING_SEPARATION = 4.2 // metres between the two routes' centrelines, with a small margin over the 3.8m ballast width so a gap is visible between them
+const PARTING_SEARCH_STEP = 0.5 // metres per probe while searching for where the routes part
+const PARTING_SEARCH_MAX = 24 // metres — give up and use the furthest point tried if a very shallow fork never reaches full separation this close in
 const FREE_END_PROXIMITY = 3 // metres — within this of an open piece's free end counts as "the end itself"
 const PREVIEW_SAMPLES = 24
 const PREVIEW_RADIUS = 0.35
 const PREVIEW_COLOR = 0x5eead4
+const EDGE_PAN_MARGIN = 72 // pixels from the canvas edge that trigger panning during an active drag
+const EDGE_PAN_PIXELS_PER_SECOND = 900 // pan rate at full margin intrusion, in screen pixels — converted to world units by the current zoom, so it feels the same regardless of how far zoomed in
+
+/**
+ * @typedef {Object} PieceLink
+ * @property {TrackPiece} piece The piece this end continues onto.
+ * @property {'start' | 'end'} end Which end of `piece` it continues onto — 'start' means arriving at that piece's t=0 (so travel continues there with direction +1); 'end' means arriving at its t=1 (direction -1).
+ */
 
 /**
  * @typedef {Object} TrackPiece
@@ -27,12 +39,14 @@ const PREVIEW_COLOR = 0x5eead4
  * @property {THREE.Group} group Visible meshes, already added to the scene.
  * @property {THREE.Mesh} pickMesh Invisible mesh used for raycasting, not added to the scene.
  * @property {Junction[]} junctions Switch points this piece created (removed together with it on undo).
+ * @property {{start: PieceLink | null, end: PieceLink | null}} links Unconditional, switch-free continuations onto whatever was built contiguously from this piece's two ends (see pathWalker.js's stepPath) — distinct from `junctions`, which are actual forks with a choice to make. Plain extension of an existing piece, or snapping onto another piece's free end, sets these instead of creating a junction.
+ * @property {THREE.Mesh | null} [endMarker] Floating dead-end marker over this piece's far (t=1) end, present only while that end is genuinely unconnected — see deadEndMarker.js. Never relevant for a piece's own t=0: that's always resolved (link or fork) at creation. Absent on pieces not built by trackBuilder.js (e.g. the starter oval, whose every end is always linked).
  */
 
 /**
  * @typedef {Object} Junction
  * @property {number} id
- * @property {THREE.Vector3} position Where the switch sits, on the rail.
+ * @property {THREE.Vector3} position Where the arrow sits — beyond the fork itself, at the point where its two routes have visibly parted (see PARTING_SEPARATION), not at the branch vertex where they're still coincident.
  * @property {THREE.Vector3[]} directions The two directions the arrow can point.
  * @property {number} activeIndex Which of `directions` is currently shown/selected: 0 = pass straight through on the host piece, 1 = divert.
  * @property {THREE.Group} group Visible arrow, already added to the scene.
@@ -65,12 +79,39 @@ function disposeDeep(root) {
 }
 
 /**
+ * Clamps (or wraps, for a closed curve) a curve parameter into [0, 1].
+ *
+ * @param {number} t Parameter to normalise.
+ * @param {boolean} closed True if the curve loops back on itself.
+ * @returns {number} Valid parameter for getPointAt/getTangentAt.
+ */
+function clampParam(t, closed) {
+  return closed ? ((t % 1) + 1) % 1 : Math.min(1, Math.max(0, t))
+}
+
+/**
+ * Finds the point a given arc-length distance along a curve from a
+ * reference parameter (forward for a positive offset, backward for a
+ * negative one).
+ *
+ * @param {THREE.Curve} curve Curve to sample.
+ * @param {number} t Reference parameter in [0, 1].
+ * @param {number} arcOffset Signed distance in metres to step along the curve.
+ * @param {boolean} closed True if the curve loops back on itself.
+ * @returns {THREE.Vector3} The sampled point.
+ */
+function pointAtArcOffset(curve, t, arcOffset, closed) {
+  const length = curve.getLength()
+  const deltaT = length > 1e-6 ? arcOffset / length : 0
+  return curve.getPointAt(clampParam(t + deltaT, closed))
+}
+
+/**
  * Finds the direction from a point on a curve toward another point a fixed
- * arc-length distance further along it (forward for a positive offset,
- * backward for a negative one). Used so a switch arrow points toward where
- * a route actually goes, not just the instantaneous tangent at the switch
- * itself — two routes that leave a junction tangent to each other still
- * read as distinct directions a few metres out.
+ * arc-length distance further along it. Used so a switch arrow points
+ * toward where a route actually goes, not just the instantaneous tangent at
+ * the switch itself — two routes that leave a junction tangent to each
+ * other still read as distinct directions once sampled far enough out.
  *
  * @param {THREE.Curve} curve Curve to sample.
  * @param {number} t Reference parameter in [0, 1].
@@ -79,14 +120,36 @@ function disposeDeep(root) {
  * @returns {THREE.Vector3} Unit direction from the reference point toward the sampled point.
  */
 function sampleDirectionAlong(curve, t, arcOffset, closed) {
-  const length = curve.getLength()
-  const deltaT = length > 1e-6 ? arcOffset / length : 0
-  let t2 = t + deltaT
-  t2 = closed ? ((t2 % 1) + 1) % 1 : Math.min(1, Math.max(0, t2))
-  const p1 = curve.getPointAt(t)
-  const p2 = curve.getPointAt(t2)
+  const p1 = curve.getPointAt(clampParam(t, closed))
+  const p2 = pointAtArcOffset(curve, t, arcOffset, closed)
   const direction = new THREE.Vector3().subVectors(p2, p1)
-  return direction.lengthSq() < 1e-8 ? curve.getTangentAt(t).clone() : direction.normalize()
+  return direction.lengthSq() < 1e-8 ? curve.getTangentAt(clampParam(t, closed)).clone() : direction.normalize()
+}
+
+/**
+ * Finds how far out along two routes leaving the same junction they have to
+ * run before their centrelines are far enough apart to read as two separate
+ * tracks rather than one lying on top of the other (see PARTING_SEPARATION).
+ * Used to place a junction's arrow — and sample the directions it points
+ * in — beyond the fork, where it's unambiguous which track is which.
+ *
+ * @param {THREE.Curve} curveA First route's curve.
+ * @param {number} tA Parameter on curveA where the junction sits.
+ * @param {boolean} closedA True if curveA loops back on itself.
+ * @param {1 | -1} signA Direction of travel away from the junction on curveA.
+ * @param {THREE.Curve} curveB Second route's curve.
+ * @param {number} tB Parameter on curveB where the junction sits.
+ * @param {boolean} closedB True if curveB loops back on itself.
+ * @param {1 | -1} signB Direction of travel away from the junction on curveB.
+ * @returns {number} Arc-length distance in metres along each route to sample from.
+ */
+function findPartingOffset(curveA, tA, closedA, signA, curveB, tB, closedB, signB) {
+  for (let offset = PARTING_SEARCH_STEP; offset <= PARTING_SEARCH_MAX; offset += PARTING_SEARCH_STEP) {
+    const pointA = pointAtArcOffset(curveA, tA, signA * offset, closedA)
+    const pointB = pointAtArcOffset(curveB, tB, signB * offset, closedB)
+    if (pointA.distanceTo(pointB) >= PARTING_SEPARATION) return offset
+  }
+  return PARTING_SEARCH_MAX
 }
 
 /**
@@ -109,10 +172,13 @@ function pickTangentSign(rawTangent, start, target) {
 
 /**
  * Whether a point on a piece is at (or effectively at) its free end — the
- * tip of an open piece, where nothing continues past it. Building from a
- * free end is a plain continuation with nowhere else to go, not a choice
- * between routes, so it shouldn't get a switch arrow. A closed loop (the
- * main oval) has no free end — every point on it continues both ways.
+ * tip of an open piece where nothing continues past it yet. Building from a
+ * free end is a plain continuation with nowhere else to compete with, not a
+ * choice between routes, so it gets a switch-free link (see TrackPiece.links)
+ * instead of a junction. An end that's already linked no longer counts as
+ * free — a third piece arriving there is a genuine fork and needs a proper
+ * junction, same as branching off the middle of a piece would. A closed loop
+ * (the main oval) has no free end — every point on it continues both ways.
  *
  * @param {TrackPiece} piece Piece the point is on.
  * @param {number} t Parameter on that piece's curve.
@@ -121,19 +187,27 @@ function pickTangentSign(rawTangent, start, target) {
 function isAtFreeEnd(piece, t) {
   if (piece.closed) return false
   const length = piece.curve.getLength()
-  return t * length < FREE_END_PROXIMITY || (1 - t) * length < FREE_END_PROXIMITY
+  if (t * length < FREE_END_PROXIMITY) return !piece.links.start
+  if ((1 - t) * length < FREE_END_PROXIMITY) return !piece.links.end
+  return false
 }
 
 /**
  * Sets up interactive click-and-drag track laying on top of an existing
- * Three.js scene: dragging from a piece of existing track extends it with a
- * new, curvature-limited segment; right-clicking undoes the most recently
- * laid segment (a plain stack, so repeated right-clicks walk back further).
- * If a drag's end passes close to a different piece of track, it snaps onto
- * it with a tangent-matched join and a switch point instead of ending free.
- * Every branch point (where a new piece starts, and any auto-connected end)
- * gets a floating arrow showing — and letting you change — which way it's
- * switched; clicking an arrow toggles it.
+ * Three.js scene: dragging from a piece of existing track lays one piece
+ * from the real Setrack-derived catalogue (trackCatalogue.js) — whichever
+ * straight length or curve radius (dragging from a free end) or point/Y-point
+ * diverging road (dragging from mid-piece, or an end that's already linked)
+ * best matches the live cursor position, snapping discretely as you move;
+ * right-clicking undoes the most recently laid piece (a plain stack, so
+ * repeated right-clicks walk back further). If a piece's rigid end happens to
+ * land cleanly on another piece, it joins there instead of ending free — a
+ * seamless join on a free end (including two straights meeting end to end),
+ * or a real fork if it lands mid-piece (or on an end that's already linked)
+ * at a genuine point/Y-point angle, exactly as if it had been dragged the
+ * other way round — see findConnection. Every fork gets a floating arrow
+ * showing, and letting you change, which way it's switched; clicking an
+ * arrow toggles it. A plain join gets no arrow: there's nothing to choose.
  *
  * Track-drag interaction is only active while `setEnabled(true)` — intended
  * to be armed for LAY mode and disarmed for PLAY mode. Switch arrows can be
@@ -158,6 +232,10 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   const undoStack = []
   const junctions = []
   let drag = null
+  let edgePanFrameId = null
+  let lastEdgePanTime = 0
+  let lastPointerClientX = 0
+  let lastPointerClientY = 0
 
   /**
    * Updates the shared raycaster's NDC pointer from a mouse/pointer event.
@@ -169,6 +247,8 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
     const rect = domElement.getBoundingClientRect()
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+    lastPointerClientX = event.clientX
+    lastPointerClientY = event.clientY
   }
 
   /**
@@ -200,133 +280,99 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   }
 
   /**
-   * Finds the closest point, on any track piece other than the one given, to
-   * a world point — if one exists within SNAP_TOLERANCE.
+   * Checks whether a (now-fixed, rigid) candidate piece's endpoint happens to land cleanly on another
+   * piece — close enough in position (SNAP_POSITION_TOLERANCE) to count as a deliberate join rather than
+   * two pieces just passing near each other. What landing there actually means depends on what's already
+   * there: landing on a free end (see isAtFreeEnd) needs the tangents to be parallel or exactly opposite
+   * (a plain link — a seamless continuation, including two straights meeting end to end); landing
+   * mid-piece, or on an end that's already linked, needs the angle between the tangents to be close to a
+   * *real* point's diverge angle (22.5°) or one leg of a Y-point's (11.25°) — a fork there, exactly as if
+   * this piece had been dragged outward from that spot as the host instead (see createJunctionAt). Any
+   * other angle doesn't correspond to a real Setrack item, so no connection — nothing here ever bends to
+   * fit, unlike the old free-form drag.
    *
-   * @param {THREE.Vector3} point World point to search near (e.g. the live drag target).
+   * @param {THREE.Vector3} endPoint Candidate's fixed endpoint.
+   * @param {THREE.Vector3} endTangent Candidate's fixed unit tangent at endPoint.
    * @param {TrackPiece} excludePiece Piece to ignore (the one the current drag started from).
-   * @returns {{piece: TrackPiece, t: number, point: THREE.Vector3, distance: number} | null} Closest nearby point, or null if nothing is within tolerance.
+   * @returns {{type: 'link' | 'fork', piece: TrackPiece, t: number} | null} What kind of connection to make, and where.
    */
-  function findSnapTarget(point, excludePiece) {
+  function findConnection(endPoint, endTangent, excludePiece) {
     let best = null
     for (const piece of pieces) {
       if (piece === excludePiece) continue
-      const closest = closestPointOnCurve(piece.curve, point, { closed: piece.closed })
-      if (closest.distance <= SNAP_TOLERANCE && (!best || closest.distance < best.distance)) {
-        best = { piece, t: closest.t, point: closest.point, distance: closest.distance }
+      const closest = closestPointOnCurve(piece.curve, endPoint, { closed: piece.closed })
+      if (closest.distance > SNAP_POSITION_TOLERANCE) continue
+      if (best && closest.distance >= best.distance) continue
+
+      const targetTangent = piece.curve.getTangentAt(closest.t)
+      const angle = Math.acos(THREE.MathUtils.clamp(Math.abs(endTangent.dot(targetTangent)), -1, 1))
+      if (isAtFreeEnd(piece, closest.t)) {
+        if (angle < SNAP_ANGLE_TOLERANCE) best = { type: 'link', piece, t: closest.t, distance: closest.distance }
+      } else if (Math.abs(angle - POINT_DIVERGE_ANGLE) < SNAP_ANGLE_TOLERANCE || Math.abs(angle - Y_POINT_HALF_ANGLE) < SNAP_ANGLE_TOLERANCE) {
+        best = { type: 'fork', piece, t: closest.t, distance: closest.distance }
       }
     }
     return best
   }
 
   /**
-   * Given a fixed start point/tangent and a free target point, finds the
-   * buildable end point closest to the target that keeps the curve within
-   * the minimum radius.
+   * Lists the single closest point on every other piece's curve within MAGNET_RADIUS of a world point,
+   * nearest first — free end or deep in the middle, either is a potential landing spot (see
+   * findConnection). Every catalogue piece is a fixed shape, so a rigid piece aimed at the raw cursor
+   * position will only land within SNAP_POSITION_TOLERANCE of existing track by coincidence — too fine a
+   * needle to thread by eye. This feeds pickDragCandidate below, which checks each nearby spot in turn to
+   * see if *some* candidate would actually connect there, and prefers that one over the naive
+   * closest-to-cursor pick, the way a model railway CAD tool's magnetic snap does.
    *
-   * For this tangent-locked construction (the control point sits on the
-   * fixed start tangent, at half the chord length), the radius of curvature
-   * for a given deflection angle scales with distance — a sharp turn only
-   * becomes safe with enough room to curve through, not less. So distance
-   * is preserved from the drag, and only the deflection angle (between the
-   * fixed tangent and the chord to the target) is clamped, swinging the end
-   * point toward the tangent just enough to stay within the minimum radius.
-   *
-   * @param {THREE.Vector3} start Fixed start point.
-   * @param {THREE.Vector3} tangent Unit tangent the new track must leave the start point along.
-   * @param {THREE.Vector3} target Free target point (e.g. under the cursor).
-   * @returns {{end: THREE.Vector3, control: THREE.Vector3}} Clamped end point and the matching Bezier control point.
+   * @param {THREE.Vector3} groundPoint Live cursor ground position.
+   * @param {TrackPiece} excludePiece The piece the current drag started from.
+   * @returns {THREE.Vector3[]} Nearby landing points, nearest first.
    */
-  function clampToBuildable(start, tangent, target) {
-    const direct = new THREE.Vector3().subVectors(target, start)
-    const distance = direct.length()
-    if (distance < 1e-4) return { end: start.clone(), control: start.clone() }
-
-    const chordDir = direct.clone().normalize()
-    const handleLength = distance * 0.5
-    const control = new THREE.Vector3().copy(start).addScaledVector(tangent, handleLength)
-
-    const axis = new THREE.Vector3().crossVectors(tangent, chordDir)
-    if (axis.lengthSq() < 1e-10) {
-      // Chord already runs along (or exactly against) the tangent — no turning involved either way.
-      const end = new THREE.Vector3().copy(start).addScaledVector(chordDir, distance)
-      return { end, control }
+  function findNearbyLandingPoints(groundPoint, excludePiece) {
+    const found = []
+    for (const piece of pieces) {
+      if (piece === excludePiece) continue
+      const closest = closestPointOnCurve(piece.curve, groundPoint, { closed: piece.closed })
+      if (closest.distance <= MAGNET_RADIUS) found.push(closest)
     }
-    axis.normalize()
-    const fullAngle = Math.min(
-      Math.acos(THREE.MathUtils.clamp(tangent.dot(chordDir), -1, 1)),
-      MAX_DEFLECTION_ANGLE,
-    )
-
-    function endAndRadiusForAngle(theta) {
-      const rotatedChordDir = tangent.clone().applyAxisAngle(axis, theta)
-      const end = new THREE.Vector3().copy(start).addScaledVector(rotatedChordDir, distance)
-      return { end, radius: quadraticBezierMinRadius(start, control, end) }
-    }
-
-    let best = endAndRadiusForAngle(fullAngle)
-    if (best.radius < MIN_CURVE_RADIUS) {
-      let lo = 0 // angle 0 (straight ahead) always has infinite radius, so it's always safe
-      let hi = fullAngle
-      for (let i = 0; i < 14; i++) {
-        const mid = (lo + hi) / 2
-        const candidate = endAndRadiusForAngle(mid)
-        if (candidate.radius >= MIN_CURVE_RADIUS) {
-          lo = mid
-          best = candidate
-        } else {
-          hi = mid
-        }
-      }
-    }
-    return { end: best.end, control }
+    found.sort((a, b) => a.distance - b.distance)
+    return found.map((entry) => entry.point)
   }
 
   /**
-   * Tries to build a smooth, tangent-matched connection from a fixed
-   * start point/tangent to a point on another piece of track, so the new
-   * track joins it like a real point rather than butting in at an angle.
-   * Returns null if no nearby track is in range, or if the smoothest
-   * possible join would still be tighter than the minimum curve radius.
+   * Picks the drag's winning candidate for the current cursor position, and whether its far end connects
+   * onto another piece — whether this drag is itself a plain continuation or a fork (see isFork in
+   * handlePointerDown): either way, the resulting piece has its own tip, and that tip can just as well
+   * land on more existing track (building a crossover between two lines in one drag, say). This first
+   * tries the straightforward closest-to-cursor pick; if that doesn't happen to connect, it then checks
+   * every landing spot within MAGNET_RADIUS of the cursor in turn, using *that* point as the aim instead
+   * — if any candidate connects there (as a plain link or a fork — see findConnection), that candidate
+   * wins instead, so dragging roughly toward existing track reliably joins it rather than requiring a
+   * pixel-perfect rigid-geometry coincidence.
    *
-   * @param {THREE.Vector3} start Fixed start point.
-   * @param {THREE.Vector3} tangent Unit tangent the new track must leave the start point along.
-   * @param {THREE.Vector3} searchPoint Point to search near for other track (e.g. the live drag target).
-   * @param {TrackPiece} excludePiece The piece the drag started from, excluded from the search.
-   * @returns {{piece: TrackPiece, t: number, point: THREE.Vector3, tangent: THREE.Vector3, curve: THREE.CubicBezierCurve3} | null} The snap target and matching curve, or null.
+   * @param {PieceCandidate[]} candidates This drag's candidate set (see pieceCandidates.js).
+   * @param {THREE.Vector3} ground Live cursor ground position.
+   * @param {TrackPiece} excludePiece The piece the current drag started from.
+   * @returns {{winning: PieceCandidate, snap: {type: 'link' | 'fork', piece: TrackPiece, t: number} | null}} The chosen candidate and its connection, if any.
    */
-  function trySnapConnection(start, tangent, searchPoint, excludePiece) {
-    const target = findSnapTarget(searchPoint, excludePiece)
-    if (!target) return null
+  function pickDragCandidate(candidates, ground, excludePiece) {
+    const direct = closestCandidate(candidates, ground)
+    const directSnap = findConnection(direct.road.endPoint, direct.road.endTangent, excludePiece)
+    if (directSnap) return { winning: direct, snap: directSnap }
 
-    const targetTangent = target.piece.curve.getTangentAt(target.t).clone()
-    const chord = start.distanceTo(target.point)
-    if (chord < 1e-4) return null
-
-    // Reject a join that would need a sharper turn than a single segment is
-    // ever allowed to make at either end — otherwise a cubic curve (unlike
-    // the quadratic free-drag case) can form a genuine S-bend that still
-    // passes the pointwise minimum-radius check but is still unworkable for
-    // a long rigid vehicle.
-    const chordDir = new THREE.Vector3().subVectors(target.point, start).normalize()
-    const departureAngle = Math.acos(THREE.MathUtils.clamp(tangent.dot(chordDir), -1, 1))
-    const arrivalAngle = Math.acos(THREE.MathUtils.clamp(targetTangent.dot(chordDir), -1, 1))
-    if (departureAngle > MAX_DEFLECTION_ANGLE || arrivalAngle > MAX_DEFLECTION_ANGLE) return null
-
-    const handleLength = chord / 3
-    const p1 = new THREE.Vector3().copy(start).addScaledVector(tangent, handleLength)
-    const p2 = new THREE.Vector3().copy(target.point).addScaledVector(targetTangent, -handleLength)
-    const curve = new THREE.CubicBezierCurve3(start.clone(), p1, p2, target.point.clone())
-
-    if (curveMinRadius(curve, 30) < MIN_CURVE_RADIUS) return null
-    return { piece: target.piece, t: target.t, point: target.point, tangent: targetTangent, curve }
+    for (const target of findNearbyLandingPoints(ground, excludePiece)) {
+      const magnetCandidate = closestCandidate(candidates, target)
+      const magnetSnap = findConnection(magnetCandidate.road.endPoint, magnetCandidate.road.endTangent, excludePiece)
+      if (magnetSnap) return { winning: magnetCandidate, snap: magnetSnap }
+    }
+    return { winning: direct, snap: null }
   }
 
   /**
    * Creates a switch arrow at a point, adds it to the scene, and registers
    * it in the shared junction list along with the routing it controls.
    *
-   * @param {THREE.Vector3} position Where the switch sits.
+   * @param {THREE.Vector3} position Where the arrow sits (see the Junction typedef's position field).
    * @param {THREE.Vector3[]} directions The two directions it can point.
    * @param {TrackPiece} hostPiece Piece a train passes straight through on when this switch is at index 0.
    * @param {number} hostT Parameter on hostPiece where the switch sits.
@@ -390,7 +436,38 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   }
 
   /**
-   * Rebuilds the drag preview tube from the current drag's curve.
+   * Flags a piece's far (t=1) end as genuinely unconnected with a small floating marker — see
+   * deadEndMarker.js. A no-op if it's already marked. Never called for t=0: a piece's own start is
+   * always resolved (plain link or fork) the instant it's created, so it never needs one.
+   *
+   * @param {TrackPiece} piece
+   * @returns {void}
+   */
+  function markEndDangling(piece) {
+    if (piece.endMarker) return
+    const marker = createDeadEndMarker(piece.curve.getPointAt(1))
+    scene.add(marker)
+    piece.endMarker = marker
+  }
+
+  /**
+   * Removes a piece's dead-end marker, if it has one — called wherever something just connected to a
+   * piece's far end (a fresh plain link). Harmless no-op otherwise, including when called for a piece
+   * whose relevant end was actually its t=0 (which never carries a marker in the first place — see
+   * markEndDangling), so callers don't need to work out which end was involved before calling this.
+   *
+   * @param {TrackPiece} piece
+   * @returns {void}
+   */
+  function clearEndMarker(piece) {
+    if (!piece.endMarker) return
+    scene.remove(piece.endMarker)
+    piece.endMarker.geometry.dispose()
+    piece.endMarker = null
+  }
+
+  /**
+   * Rebuilds the drag preview tube from the current drag's winning candidate piece.
    *
    * @returns {void}
    */
@@ -399,8 +476,7 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
       scene.remove(drag.previewMesh)
       disposeDeep(drag.previewMesh)
     }
-    const curve = drag.snap ? drag.snap.curve : new THREE.QuadraticBezierCurve3(drag.start, drag.control, drag.end)
-    const geometry = new THREE.TubeGeometry(curve, PREVIEW_SAMPLES, PREVIEW_RADIUS, 6, false)
+    const geometry = new THREE.TubeGeometry(drag.winning.road.curve, PREVIEW_SAMPLES, PREVIEW_RADIUS, 6, false)
     const material = new THREE.MeshBasicMaterial({ color: PREVIEW_COLOR, transparent: true, opacity: 0.85 })
     drag.previewMesh = new THREE.Mesh(geometry, material)
     scene.add(drag.previewMesh)
@@ -417,8 +493,41 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
       scene.remove(drag.previewMesh)
       disposeDeep(drag.previewMesh)
     }
+    releasePointerCapture(drag.pointerId)
     controls.enabled = true
     drag = null
+    domElement.style.cursor = ''
+  }
+
+  /**
+   * Explicitly captures the pointer to the canvas for the duration of a drag, so every subsequent
+   * pointermove for this gesture is guaranteed to keep targeting (and bubbling from) this element even
+   * once the cursor strays outside its bounds near the edge of the screen — without this, delivery of
+   * those events is left to each browser's own implicit-capture heuristics, which edge-panning depends
+   * on firing reliably. Safe to call even where unsupported (wrapped, since older pointerType edge cases
+   * can throw).
+   *
+   * @param {number} pointerId
+   * @returns {void}
+   */
+  function capturePointer(pointerId) {
+    try {
+      domElement.setPointerCapture(pointerId)
+    } catch {
+      // Unsupported for this pointer/browser — the browser's own implicit capture is the fallback.
+    }
+  }
+
+  /**
+   * @param {number} pointerId
+   * @returns {void}
+   */
+  function releasePointerCapture(pointerId) {
+    try {
+      if (domElement.hasPointerCapture(pointerId)) domElement.releasePointerCapture(pointerId)
+    } catch {
+      // Already released, or unsupported — nothing to do either way.
+    }
   }
 
   /**
@@ -433,6 +542,7 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
 
     event.preventDefault()
     controls.enabled = false
+    capturePointer(event.pointerId)
 
     const rawTangent = hit.piece.curve.getTangentAt(hit.t).clone()
     drag = {
@@ -442,11 +552,40 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
       start: hit.point.clone(),
       rawTangent,
       tangentSign: 1, // default: continue the same way the source piece was heading
-      control: hit.point.clone(),
-      end: hit.point.clone(),
+      // Decided once, at the start point, rather than re-checked every move: whether this is a plain
+      // continuation (free end, so any straight/curve from the catalogue) or a genuine fork (mid-piece,
+      // or an end that already has a plain link) which can only ever be a real point or Y-point's
+      // diverging road — see freeCandidates/forkCandidates in pieceCandidates.js.
+      isFork: !isAtFreeEnd(hit.piece, hit.t),
+      groundDistance: 0,
+      winning: null,
       snap: null,
       previewMesh: null,
     }
+    domElement.style.cursor = 'crosshair'
+    if (edgePanFrameId === null) edgePanFrameId = requestAnimationFrame(edgePanStep)
+  }
+
+  /**
+   * Re-evaluates the in-progress drag's winning candidate and snap target from wherever the shared
+   * `pointer` NDC currently points, and refreshes the preview. Split out from handlePointerMove so the
+   * edge-pan loop (which moves the camera under a stationary cursor, not the cursor itself) can reuse
+   * the same logic without a synthetic pointer event.
+   *
+   * @returns {void}
+   */
+  function updateDragFromPointer() {
+    const ground = pickGround()
+    if (!ground) return
+
+    drag.groundDistance = ground.distanceTo(drag.start)
+    drag.tangentSign = pickTangentSign(drag.rawTangent, drag.start, ground)
+    const tangent = drag.rawTangent.clone().multiplyScalar(drag.tangentSign)
+    const candidates = drag.isFork ? forkCandidates(drag.start, tangent) : freeCandidates(drag.start, tangent)
+    const { winning, snap } = pickDragCandidate(candidates, ground, drag.startPiece)
+    drag.winning = winning
+    drag.snap = snap
+    updatePreview()
   }
 
   /**
@@ -456,17 +595,78 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   function handlePointerMove(event) {
     if (!drag || event.pointerId !== drag.pointerId) return
     setPointerFromEvent(event)
-    const ground = pickGround()
-    if (!ground) return
+    updateDragFromPointer()
+  }
 
-    drag.tangentSign = pickTangentSign(drag.rawTangent, drag.start, ground)
-    const tangent = drag.rawTangent.clone().multiplyScalar(drag.tangentSign)
-    const { end, control } = clampToBuildable(drag.start, tangent, ground)
-    drag.end = end
-    drag.control = control
-    drag.tangent = tangent
-    drag.snap = trySnapConnection(drag.start, tangent, ground, drag.startPiece)
-    updatePreview()
+  /**
+   * Pans the camera (by moving OrbitControls' target — controls.update(), called here and again every
+   * render frame, re-derives camera.position from it) whenever an in-progress drag's pointer sits near
+   * the canvas edge, so a piece can be aimed at track beyond the current view without letting go to pan
+   * manually first. Self-schedules via requestAnimationFrame and stops on its own once the drag ends.
+   *
+   * @param {number} now Timestamp from requestAnimationFrame.
+   * @returns {void}
+   */
+  function edgePanStep(now) {
+    if (!drag) {
+      edgePanFrameId = null
+      lastEdgePanTime = 0
+      return
+    }
+    const delta = lastEdgePanTime ? Math.min(0.1, (now - lastEdgePanTime) / 1000) : 0
+    lastEdgePanTime = now
+
+    const rect = domElement.getBoundingClientRect()
+    const px = lastPointerClientX - rect.left
+    const py = lastPointerClientY - rect.top
+    const edgeFactor = (distanceIntoMargin) => THREE.MathUtils.clamp(distanceIntoMargin / EDGE_PAN_MARGIN, 0, 1)
+
+    let panX = 0
+    let panY = 0
+    if (px < EDGE_PAN_MARGIN) panX = -edgeFactor(EDGE_PAN_MARGIN - px)
+    else if (px > rect.width - EDGE_PAN_MARGIN) panX = edgeFactor(px - (rect.width - EDGE_PAN_MARGIN))
+    if (py < EDGE_PAN_MARGIN) panY = -edgeFactor(EDGE_PAN_MARGIN - py)
+    else if (py > rect.height - EDGE_PAN_MARGIN) panY = edgeFactor(py - (rect.height - EDGE_PAN_MARGIN))
+
+    if ((panX !== 0 || panY !== 0) && delta > 0) {
+      // Orthographic frustum width/height at the current zoom, divided by canvas size, converts a
+      // screen-pixel pan rate into the right world-space distance regardless of how far zoomed in.
+      const worldPerPixelX = (camera.right - camera.left) / camera.zoom / rect.width
+      const worldPerPixelY = (camera.top - camera.bottom) / camera.zoom / rect.height
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0)
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1)
+      const offset = new THREE.Vector3()
+        .addScaledVector(right, panX * EDGE_PAN_PIXELS_PER_SECOND * delta * worldPerPixelX)
+        .addScaledVector(up, -panY * EDGE_PAN_PIXELS_PER_SECOND * delta * worldPerPixelY) // screen Y grows downward, world "up" is the opposite sense
+      controls.target.add(offset)
+      controls.update()
+      updateDragFromPointer() // the world point under the (unmoved) cursor just changed — refresh the preview to match
+    }
+
+    edgePanFrameId = requestAnimationFrame(edgePanStep)
+  }
+
+  /**
+   * Updates the canvas cursor to show what a click would do: a pointer over a junction arrow (clickable
+   * in either mode), a crosshair over track while LAY mode is armed (drag here to build), or the
+   * default cursor otherwise. Left alone entirely while a drag is in progress.
+   *
+   * @param {PointerEvent} event
+   * @returns {void}
+   */
+  function updateHoverCursor(event) {
+    if (drag) return
+    setPointerFromEvent(event)
+    raycaster.setFromCamera(pointer, camera)
+    const junctionHit = raycaster.intersectObjects(
+      junctions.map((junction) => junction.pickMesh),
+      false,
+    )
+    if (junctionHit.length > 0) {
+      domElement.style.cursor = 'pointer'
+      return
+    }
+    domElement.style.cursor = enabled && pickTrack() ? 'crosshair' : ''
   }
 
   /**
@@ -476,30 +676,40 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   function handlePointerUp(event) {
     if (!drag || event.pointerId !== drag.pointerId) return
 
-    const finalCurve = drag.snap ? drag.snap.curve : new THREE.QuadraticBezierCurve3(drag.start, drag.control, drag.end)
     if (drag.previewMesh) {
       scene.remove(drag.previewMesh)
       disposeDeep(drag.previewMesh)
     }
 
-    if (finalCurve.getLength() >= MIN_SEGMENT_LENGTH) {
+    // drag.winning is null until the first move, and the ground-distance gate rejects a bare click —
+    // either way, nothing committed means nothing to build.
+    if (drag.winning && drag.groundDistance >= MIN_DRAG_DISTANCE) {
+      const finalCurve = drag.winning.road.curve
       const { group, pickMesh } = buildTrackMeshes(finalCurve, { closed: false })
       scene.add(group)
-      const piece = { id: nextId++, curve: finalCurve, closed: false, group, pickMesh, junctions: [] }
+      const piece = { id: nextId++, curve: finalCurve, closed: false, group, pickMesh, junctions: [], links: { start: null, end: null }, endMarker: null }
       pieces.push(piece)
       undoStack.push(piece)
 
-      // Branch point: where this new piece leaves its source track. Only a
-      // real junction if the source track continues past this point some
-      // other way too — building off an open piece's free end is just an
-      // extension, with nowhere else to go, so it gets no switch arrow.
-      if (!isAtFreeEnd(drag.startPiece, drag.startT)) {
+      // Branch point: where this new piece leaves its source track. A plain,
+      // switch-free extension off a free end (see TrackPiece.links); a
+      // genuine fork (mid-piece, or an end that's already linked) resolves
+      // into a real point or Y-point, using the exact catalogue geometry
+      // drag.winning was chosen from — see pieceCandidates.js's
+      // forkCandidates and the isFork decision in handlePointerDown.
+      if (!drag.isFork) {
+        linkPieceEnds(drag.startPiece, drag.startT, piece, 0)
+        clearEndMarker(drag.startPiece) // drag.startPiece's own end, if it had one, just got connected
+      } else {
+        const offset = findPartingOffset(drag.startPiece.curve, drag.startT, drag.startPiece.closed, 1, finalCurve, 0, false, 1)
+        const hostPoint = pointAtArcOffset(drag.startPiece.curve, drag.startT, offset, drag.startPiece.closed)
+        const divertPoint = pointAtArcOffset(finalCurve, 0, offset, false)
         piece.junctions.push(
           createJunctionAt(
-            drag.start,
+            hostPoint.clone().lerp(divertPoint, 0.5),
             [
-              sampleDirectionAlong(drag.startPiece.curve, drag.startT, JUNCTION_SAMPLE_DISTANCE, drag.startPiece.closed),
-              sampleDirectionAlong(finalCurve, 0, JUNCTION_SAMPLE_DISTANCE, false),
+              sampleDirectionAlong(drag.startPiece.curve, drag.startT, offset, drag.startPiece.closed),
+              sampleDirectionAlong(finalCurve, 0, offset, false),
             ],
             drag.startPiece,
             drag.startT,
@@ -510,14 +720,23 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
         )
       }
 
-      // Auto-connected end, if this drag snapped onto another piece — same rule applies there.
-      if (drag.snap && !isAtFreeEnd(drag.snap.piece, drag.snap.t)) {
+      // Auto-connected end, if this piece's rigid endpoint happened to land cleanly on another piece —
+      // see findConnection. A plain link for a free end (including two straights meeting end to end); a
+      // real fork, exactly like the branch above but built from the landing side instead, if it landed
+      // mid-piece (or on an already-linked end) at a genuine point or Y-point angle.
+      if (drag.snap?.type === 'link') {
+        linkPieceEnds(drag.snap.piece, drag.snap.t, piece, 1)
+        clearEndMarker(drag.snap.piece) // same here, for whichever existing piece this one just rejoined
+      } else if (drag.snap?.type === 'fork') {
+        const offset = findPartingOffset(drag.snap.piece.curve, drag.snap.t, drag.snap.piece.closed, 1, finalCurve, 1, false, -1)
+        const hostPoint = pointAtArcOffset(drag.snap.piece.curve, drag.snap.t, offset, drag.snap.piece.closed)
+        const divertPoint = pointAtArcOffset(finalCurve, 1, -offset, false)
         piece.junctions.push(
           createJunctionAt(
-            drag.snap.point,
+            hostPoint.clone().lerp(divertPoint, 0.5),
             [
-              sampleDirectionAlong(drag.snap.piece.curve, drag.snap.t, JUNCTION_SAMPLE_DISTANCE, drag.snap.piece.closed),
-              sampleDirectionAlong(finalCurve, 1, -JUNCTION_SAMPLE_DISTANCE, false),
+              sampleDirectionAlong(drag.snap.piece.curve, drag.snap.t, offset, drag.snap.piece.closed),
+              sampleDirectionAlong(finalCurve, 1, -offset, false),
             ],
             drag.snap.piece,
             drag.snap.t,
@@ -526,11 +745,15 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
             -1,
           ),
         )
+      } else {
+        markEndDangling(piece) // this piece's own far end didn't connect to anything — flag it
       }
     }
 
+    releasePointerCapture(drag.pointerId)
     controls.enabled = true
     drag = null
+    domElement.style.cursor = ''
   }
 
   /**
@@ -546,9 +769,25 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
     disposeDeep(piece.group)
     piece.pickMesh.geometry.dispose()
     piece.pickMesh.material.dispose()
+    clearEndMarker(piece) // marker lives directly in the scene, not under piece.group, so disposeDeep above doesn't reach it
     const index = pieces.indexOf(piece)
     if (index !== -1) pieces.splice(index, 1)
     piece.junctions.forEach(disposeJunction)
+    // Clear the far side of any plain link so its neighbour reports as a free
+    // end again, rather than dangling a reference to this now-disposed
+    // piece — and flag that end with a marker again, since it's genuinely
+    // open once more. Safe to assume that neighbour is older than this one
+    // (and so still standing) — the undo stack only ever pops the most
+    // recently laid piece, and anything laid after this one that links onto
+    // it would have to be undone first.
+    if (piece.links.start) {
+      piece.links.start.piece.links[piece.links.start.end] = null
+      if (piece.links.start.end === 'end') markEndDangling(piece.links.start.piece)
+    }
+    if (piece.links.end) {
+      piece.links.end.piece.links[piece.links.end.end] = null
+      if (piece.links.end.end === 'end') markEndDangling(piece.links.end.piece)
+    }
   }
 
   /**
@@ -572,6 +811,7 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   }
 
   domElement.addEventListener('pointerdown', handlePointerDown)
+  domElement.addEventListener('pointermove', updateHoverCursor)
   window.addEventListener('pointermove', handlePointerMove)
   window.addEventListener('pointerup', handlePointerUp)
   domElement.addEventListener('contextmenu', handleContextMenu)
@@ -586,26 +826,34 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
      * @returns {void}
      */
     setEnabled(value) {
+      // Called every frame regardless of whether the mode actually changed (see createRailwayScene.js's
+      // animate loop), so this must stay a no-op when nothing changed — cancelDrag() would otherwise
+      // cancel a drag on the very next frame after it started.
+      if (value === enabled) return
       enabled = value
-      if (!value) cancelDrag()
+      cancelDrag()
     },
 
     /**
      * Removes all event listeners, cancels any in-progress drag, and frees
-     * every junction arrow's geometry and shared materials. Does not remove
-     * already-committed track pieces.
+     * every junction arrow's and dead-end marker's geometry and shared
+     * materials. Does not remove already-committed track pieces.
      *
      * @returns {void}
      */
     dispose() {
       cancelDrag()
+      if (edgePanFrameId !== null) cancelAnimationFrame(edgePanFrameId)
       domElement.removeEventListener('pointerdown', handlePointerDown)
+      domElement.removeEventListener('pointermove', updateHoverCursor)
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
       domElement.removeEventListener('contextmenu', handleContextMenu)
       domElement.removeEventListener('click', handleClick)
       junctions.slice().forEach(disposeJunction)
       disposeSharedJunctionMaterials()
+      pieces.forEach(clearEndMarker)
+      disposeSharedDeadEndMaterial()
     },
 
     /**

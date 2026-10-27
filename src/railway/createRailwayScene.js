@@ -1,7 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { createOvalCenterline } from './ovalPath.js'
-import { buildTrackMeshes } from './track.js'
+import { buildStandardOval } from './standardOval.js'
 import { loadModel, placeAtPose } from './rollingStock.js'
 import { HST_FORMATION, computeCouplingOffsets } from './consist.js'
 import { createTrackBuilder } from './trackBuilder.js'
@@ -76,15 +75,13 @@ export function createRailwayScene(canvas, controller) {
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(0x202531)
 
-  const centerline = createOvalCenterline()
   const couplingOffsets = computeCouplingOffsets(HST_FORMATION)
-  const { group: ovalGroup, pickMesh: ovalPickMesh } = buildTrackMeshes(centerline, { closed: true })
-  scene.add(ovalGroup)
 
   // Shared, mutable list of every track piece (the starting oval plus
   // anything laid in LAY mode). trackBuilder pushes/splices this directly.
-  const ovalPiece = { id: 0, curve: centerline, closed: true, group: ovalGroup, pickMesh: ovalPickMesh }
-  const pieces = [ovalPiece]
+  const { pieces: ovalPieces } = buildStandardOval(scene)
+  const pieces = [...ovalPieces]
+  const ovalPiece = ovalPieces[0] // lap-start reference for the initial train placement/backfill below
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a3a, 1.1))
   const sun = new THREE.DirectionalLight(0xffffff, 1.6)
@@ -110,7 +107,10 @@ export function createRailwayScene(canvas, controller) {
 
   const controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
-  controls.minZoom = 0.3
+  // minZoom sets how far out the view can go: ISO_VIEW_SIZE / minZoom metres across. 0.005 gives
+  // ~27km, comfortably covering a 10-real-mile (~16km) layout with room to spare — this sim already
+  // runs at full prototype scale everywhere else (1.435m gauge, ~4m tall locos), not tabletop OO size.
+  controls.minZoom = 0.005
   controls.maxZoom = 8
   // Keep the camera at or above track level — no viewing the layout from underground.
   controls.maxPolarAngle = Math.PI / 2
@@ -123,7 +123,6 @@ export function createRailwayScene(canvas, controller) {
     controls,
     pieces,
   })
-
   // The lead unit's position is tracked as a walk through the track graph
   // (piece + parameter + direction), stepped forward by stepPath whenever it
   // advances into new territory — that's the only time junction switch state
