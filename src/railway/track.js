@@ -19,6 +19,18 @@ const RAIL_COLOR = 0x9ca0a8
 const SLEEPER_COLOR = 0x5a4634
 const BALLAST_COLOR = 0x6e6a63
 
+const BOUNDARY_MARKER_LENGTH = BALLAST_TOP_HALF_WIDTH * 2 + 0.6 // a little wider than the ballast bed so it reads clearly at a glance
+const BOUNDARY_MARKER_THICKNESS = 0.1 // along-track
+const BOUNDARY_MARKER_HEIGHT = 0.06
+const BOUNDARY_MARKER_Y = RAIL_TOP_Y + 0.03 // just proud of the rail heads, clear of z-fighting
+const BOUNDARY_MARKER_COLOR = 0xffffff
+
+let boundaryMarkerMaterial = null
+function getBoundaryMarkerMaterial() {
+  if (!boundaryMarkerMaterial) boundaryMarkerMaterial = new THREE.MeshBasicMaterial({ color: BOUNDARY_MARKER_COLOR })
+  return boundaryMarkerMaterial
+}
+
 /**
  * Returns the horizontal (XZ-plane) unit normal to a tangent vector, rotated
  * 90 degrees so it points sideways across the track.
@@ -88,13 +100,13 @@ function buildSleepers(centerline, closed, curveLength) {
 
   const matrix = new THREE.Matrix4()
   const quaternion = new THREE.Quaternion()
-  const forward = new THREE.Vector3(0, 0, 1)
+  const lengthAxis = new THREE.Vector3(1, 0, 0) // SLEEPER_LENGTH is BoxGeometry's width (local X) — align it across the track, not along it
   for (let i = 0; i < count; i++) {
     const t = closed ? i / count : i / (count - 1)
     const point = centerline.getPointAt(t)
     const tangent = centerline.getTangentAt(t)
     const normal = horizontalNormal(tangent)
-    quaternion.setFromUnitVectors(forward, normal)
+    quaternion.setFromUnitVectors(lengthAxis, normal)
     matrix.makeRotationFromQuaternion(quaternion)
     matrix.setPosition(point.x, sleeperCenterY, point.z)
     mesh.setMatrixAt(i, matrix)
@@ -153,6 +165,28 @@ function buildBallast(centerline, closed, sampleCount) {
 }
 
 /**
+ * Builds a thin white stripe across the track at one end of a piece, at right angles to the rails — so a
+ * piece's boundary is visible even though its rails and ballast run seamlessly into the next piece's,
+ * making it possible to tell at a glance which stretch of (visually continuous) track belongs to which
+ * piece. Built at both ends of every open piece (see buildTrackMeshes); skipped for a closed loop, which
+ * has no real end to mark.
+ *
+ * @param {THREE.Curve} centerline Track centreline.
+ * @param {number} t Parameter along the centreline — 0 or 1, the piece's two ends.
+ * @returns {THREE.Mesh} The marker mesh.
+ */
+function buildBoundaryMarker(centerline, t) {
+  const point = centerline.getPointAt(t)
+  const tangent = centerline.getTangentAt(t)
+  const normal = horizontalNormal(tangent)
+  const geometry = new THREE.BoxGeometry(BOUNDARY_MARKER_LENGTH, BOUNDARY_MARKER_HEIGHT, BOUNDARY_MARKER_THICKNESS)
+  const mesh = new THREE.Mesh(geometry, getBoundaryMarkerMaterial())
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), normal)
+  mesh.position.set(point.x, BOUNDARY_MARKER_Y, point.z)
+  return mesh
+}
+
+/**
  * Builds an invisible, generously thick tube around the track for reliable
  * raycasting (hover/click detection), independent of the thin visible rails.
  * Not added to the scene graph — the caller raycasts against it directly.
@@ -192,6 +226,10 @@ export function buildTrackMeshes(centerline, { closed = true } = {}) {
   group.add(buildSleepers(centerline, closed, curveLength))
   group.add(buildRail(centerline, HALF_GAUGE, railMaterial, closed, sampleCount))
   group.add(buildRail(centerline, -HALF_GAUGE, railMaterial, closed, sampleCount))
+  if (!closed) {
+    group.add(buildBoundaryMarker(centerline, 0))
+    group.add(buildBoundaryMarker(centerline, 1))
+  }
 
   const pickMesh = buildPickMesh(centerline, closed, sampleCount)
 

@@ -32,6 +32,7 @@ export const CURVE_RADII = {
   2: fromHornbyMm(438), // R606, 2nd radius
   3: fromHornbyMm(505), // R608, 3rd radius
   4: fromHornbyMm(571.5), // 4th radius
+  5: fromHornbyMm(639.5), // extrapolated 5th radius (see above) — no official Hornby code
   6: fromHornbyMm(707.5), // extrapolated 6th radius (see above) — no official Hornby code
 }
 export const CURVE_ANGLE = THREE.MathUtils.degToRad(22.5) // every Setrack single-curve section turns 22.5°
@@ -121,7 +122,7 @@ export function placeCurve(start, tangent, radiusIndex, side) {
  * Places a left- or right-hand point: a straight through road plus a diverging curved road, sharing a
  * toe (start point and tangent). Neither road is built into meshes here — that, and deciding whether
  * the junction between them is a plain link or a switchable fork, is the caller's job (see
- * trackBuilder.js and standardOval.js).
+ * trackBuilder.js and defaultLayout.js).
  *
  * @param {THREE.Vector3} start World-space toe point.
  * @param {THREE.Vector3} tangent Unit heading at the toe.

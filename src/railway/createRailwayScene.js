@@ -1,9 +1,10 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { buildStandardOval } from './standardOval.js'
+import { buildDefaultLayout } from './defaultLayout.js'
 import { loadModel, placeAtPose } from './rollingStock.js'
 import { HST_FORMATION, computeCouplingOffsets } from './consist.js'
 import { createTrackBuilder } from './trackBuilder.js'
+import { createPieceInspector } from './pieceInspector.js'
 import { stepPath } from './pathWalker.js'
 
 const MAX_LOCO_SPEED = 16 // metres per second at full throttle
@@ -77,11 +78,13 @@ export function createRailwayScene(canvas, controller) {
 
   const couplingOffsets = computeCouplingOffsets(HST_FORMATION)
 
-  // Shared, mutable list of every track piece (the starting oval plus
+  // Shared, mutable list of every track piece (the starting layout plus
   // anything laid in LAY mode). trackBuilder pushes/splices this directly.
-  const { pieces: ovalPieces } = buildStandardOval(scene)
-  const pieces = [...ovalPieces]
-  const ovalPiece = ovalPieces[0] // lap-start reference for the initial train placement/backfill below
+  const { pieces: layoutPieces, junctions: layoutJunctions } = buildDefaultLayout(scene)
+  const pieces = [...layoutPieces]
+  // Looked up by id rather than assumed to be array index 0 — the train always starts on piece #0
+  // specifically, regardless of what order buildDefaultLayout happens to push pieces in.
+  const ovalPiece = layoutPieces.find((piece) => piece.id === 0)
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a3a, 1.1))
   const sun = new THREE.DirectionalLight(0xffffff, 1.6)
@@ -123,6 +126,8 @@ export function createRailwayScene(canvas, controller) {
     controls,
     pieces,
   })
+  trackBuilder.junctions.push(...layoutJunctions) // seed with the default layout's station points, so they're switchable and the path walker sees them just like a hand-built fork
+  const pieceInspector = createPieceInspector({ camera, domElement: renderer.domElement, pieces })
   // The lead unit's position is tracked as a walk through the track graph
   // (piece + parameter + direction), stepped forward by stepPath whenever it
   // advances into new territory — that's the only time junction switch state
@@ -131,8 +136,8 @@ export function createRailwayScene(canvas, controller) {
   // units are placed by reading the same history at their coupling offset
   // behind the lead, so the whole train follows exactly what the front of it
   // actually did, through however many pieces and junctions that involved.
-  const pathState = { piece: ovalPiece, t: 0, direction: 1 }
-  const initialPose = { distance: 0, point: ovalPiece.curve.getPointAt(0), tangent: ovalPiece.curve.getTangentAt(0) }
+  const pathState = { piece: ovalPiece, t: 1, direction: 1 }
+  const initialPose = { distance: 0, point: ovalPiece.curve.getPointAt(1), tangent: ovalPiece.curve.getTangentAt(1) }
   const history = [initialPose]
   let cursorDistance = 0
   let maxDistance = 0
@@ -140,7 +145,7 @@ export function createRailwayScene(canvas, controller) {
   // Walks backward on demand, same as pathState walks forward — see the mirrored minDistance block in
   // animate() below. Starts at the same spot as pathState; backfilling (next) just runs it ahead of time
   // for however far the train's own length needs, so trailing units have real poses from frame one.
-  const backState = { piece: ovalPiece, t: 0, direction: -1 }
+  const backState = { piece: ovalPiece, t: 1, direction: -1 }
 
   // Backfill history behind distance 0 along the oval (no other track exists
   // yet), so trailing units read valid poses from the very first frame
@@ -270,6 +275,7 @@ export function createRailwayScene(canvas, controller) {
     cancelAnimationFrame(frameId)
     resizeObserver.disconnect()
     trackBuilder.dispose()
+    pieceInspector.dispose()
     // Pick meshes live outside the scene graph, so the traversal below won't reach them.
     pieces.forEach((piece) => {
       piece.pickMesh.geometry.dispose()
