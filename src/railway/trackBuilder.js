@@ -316,39 +316,20 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
   }
 
   /**
-   * Lists the single closest point on every other piece's curve within MAGNET_RADIUS of a world point,
-   * nearest first — free end or deep in the middle, either is a potential landing spot (see
-   * findConnection). Every catalogue piece is a fixed shape, so a rigid piece aimed at the raw cursor
-   * position will only land within SNAP_POSITION_TOLERANCE of existing track by coincidence — too fine a
-   * needle to thread by eye. This feeds pickDragCandidate below, which checks each nearby spot in turn to
-   * see if *some* candidate would actually connect there, and prefers that one over the naive
-   * closest-to-cursor pick, the way a model railway CAD tool's magnetic snap does.
-   *
-   * @param {THREE.Vector3} groundPoint Live cursor ground position.
-   * @param {TrackPiece} excludePiece The piece the current drag started from.
-   * @returns {THREE.Vector3[]} Nearby landing points, nearest first.
-   */
-  function findNearbyLandingPoints(groundPoint, excludePiece) {
-    const found = []
-    for (const piece of pieces) {
-      if (piece === excludePiece) continue
-      const closest = closestPointOnCurve(piece.curve, groundPoint, { closed: piece.closed })
-      if (closest.distance <= MAGNET_RADIUS) found.push(closest)
-    }
-    found.sort((a, b) => a.distance - b.distance)
-    return found.map((entry) => entry.point)
-  }
-
-  /**
    * Picks the drag's winning candidate for the current cursor position, and whether its far end connects
    * onto another piece — whether this drag is itself a plain continuation or a fork (see isFork in
    * handlePointerDown): either way, the resulting piece has its own tip, and that tip can just as well
-   * land on more existing track (building a crossover between two lines in one drag, say). This first
-   * tries the straightforward closest-to-cursor pick; if that doesn't happen to connect, it then checks
-   * every landing spot within MAGNET_RADIUS of the cursor in turn, using *that* point as the aim instead
-   * — if any candidate connects there (as a plain link or a fork — see findConnection), that candidate
-   * wins instead, so dragging roughly toward existing track reliably joins it rather than requiring a
-   * pixel-perfect rigid-geometry coincidence.
+   * land on more existing track (building a crossover between two lines in one drag, say).
+   *
+   * Checks *every* candidate in the set (not just whichever is nearest the cursor) against
+   * findConnection, and keeps whichever connecting one lands closest to the cursor — trying only the
+   * nearest candidate isn't enough, because "nearest to where you're aiming" and "the one shape that
+   * actually lines up at a real Setrack angle" are frequently two different candidates: a curve 0.3m
+   * closer to the cursor than another is still preferred by raw distance even if its arrival angle misses
+   * the target's tangent by 15°, while the slightly-further curve might land dead-on. Only candidates
+   * within MAGNET_RADIUS of the cursor are considered, so this can't reach out and connect to distant,
+   * unrelated track the user isn't actually aiming anywhere near. Falls back to the plain
+   * closest-to-cursor pick, unconnected, if nothing within range connects.
    *
    * @param {PieceCandidate[]} candidates This drag's candidate set (see pieceCandidates.js).
    * @param {THREE.Vector3} ground Live cursor ground position.
@@ -357,15 +338,20 @@ export function createTrackBuilder({ scene, camera, domElement, controls, pieces
    */
   function pickDragCandidate(candidates, ground, excludePiece) {
     const direct = closestCandidate(candidates, ground)
-    const directSnap = findConnection(direct.road.endPoint, direct.road.endTangent, excludePiece)
-    if (directSnap) return { winning: direct, snap: directSnap }
+    let best = null
+    let bestDistSq = Infinity
 
-    for (const target of findNearbyLandingPoints(ground, excludePiece)) {
-      const magnetCandidate = closestCandidate(candidates, target)
-      const magnetSnap = findConnection(magnetCandidate.road.endPoint, magnetCandidate.road.endTangent, excludePiece)
-      if (magnetSnap) return { winning: magnetCandidate, snap: magnetSnap }
+    for (const candidate of candidates) {
+      const distSq = candidate.road.endPoint.distanceToSquared(ground)
+      if (distSq > MAGNET_RADIUS * MAGNET_RADIUS) continue
+      const connection = findConnection(candidate.road.endPoint, candidate.road.endTangent, excludePiece)
+      if (!connection) continue
+      if (distSq < bestDistSq) {
+        best = { winning: candidate, snap: connection }
+        bestDistSq = distSq
+      }
     }
-    return { winning: direct, snap: null }
+    return best ?? { winning: direct, snap: null }
   }
 
   /**

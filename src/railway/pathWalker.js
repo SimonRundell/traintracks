@@ -78,10 +78,25 @@ export function stepPath(state, distance, junctions) {
         // ordinary pieces laid end to end, or a standard piece chain like
         // the starter oval.
         const link = piece.links[state.direction > 0 ? 'end' : 'start']
+        // Or this end might be the *divert* side of a fork reached from
+        // here, rather than the host side handled above — i.e. the train is
+        // trailing through a point from its diverging leg back onto the
+        // host, instead of facing it from the host and choosing a route.
+        // That's always physically possible regardless of activeIndex (the
+        // switch position only matters for a facing move starting from the
+        // host); it just needs undoing the same velocity-continuity relation
+        // createJunctionAt solved when the fork was built.
+        const trailingJunction = junctions.find(
+          (junction) => junction.divertPiece === piece && junction.divertT === state.t && junction.divertDirection === -state.direction,
+        )
         if (link) {
           state.piece = link.piece
           state.t = link.end === 'start' ? 0 : 1
           state.direction = link.end === 'start' ? 1 : -1
+        } else if (trailingJunction) {
+          state.piece = trailingJunction.hostPiece
+          state.t = trailingJunction.hostT
+          state.direction = -trailingJunction.requiredHostDirection
         } else {
           // A genuine dead end — the rest of this distance can't be covered,
           // not just "consumed as a no-op". Report that directly rather than

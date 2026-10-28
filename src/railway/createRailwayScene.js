@@ -136,6 +136,11 @@ export function createRailwayScene(canvas, controller) {
   const history = [initialPose]
   let cursorDistance = 0
   let maxDistance = 0
+  let minDistance = 0
+  // Walks backward on demand, same as pathState walks forward — see the mirrored minDistance block in
+  // animate() below. Starts at the same spot as pathState; backfilling (next) just runs it ahead of time
+  // for however far the train's own length needs, so trailing units have real poses from frame one.
+  const backState = { piece: ovalPiece, t: 0, direction: -1 }
 
   // Backfill history behind distance 0 along the oval (no other track exists
   // yet), so trailing units read valid poses from the very first frame
@@ -144,21 +149,21 @@ export function createRailwayScene(canvas, controller) {
   const maxCouplingOffset = couplingOffsets[couplingOffsets.length - 1] ?? 0
   if (maxCouplingOffset > 0) {
     const BACKFILL_STEP = 1 // metres between backfilled samples
-    const backfillState = { piece: ovalPiece, t: 0, direction: -1 }
     const backfillSamples = []
     let walked = 0
     while (walked < maxCouplingOffset) {
       const step = Math.min(BACKFILL_STEP, maxCouplingOffset - walked)
-      stepPath(backfillState, step, [])
+      stepPath(backState, step, [])
       walked += step
       backfillSamples.push({
         distance: -walked,
-        point: backfillState.piece.curve.getPointAt(backfillState.t),
-        tangent: backfillState.piece.curve.getTangentAt(backfillState.t).multiplyScalar(backfillState.direction),
+        point: backState.piece.curve.getPointAt(backState.t),
+        tangent: backState.piece.curve.getTangentAt(backState.t).multiplyScalar(backState.direction),
       })
     }
     backfillSamples.reverse() // ascending order: most negative first, ending just before distance 0
     history.unshift(...backfillSamples)
+    minDistance = -walked
   }
 
   let units = null
@@ -206,12 +211,13 @@ export function createRailwayScene(canvas, controller) {
         controls.enablePan = true
       } else {
         const speed = controller.speedFraction * MAX_LOCO_SPEED * controller.direction
-        cursorDistance = Math.max(0, cursorDistance + speed * delta)
+        cursorDistance = cursorDistance + speed * delta
 
         // Only extend the path (and so only ever consult junction switch
         // state) when moving into territory beyond anywhere already
-        // visited. Reversing back over already-recorded ground just rereads
-        // that history — it doesn't undo or re-decide anything.
+        // visited, in *either* direction. Moving back over already-recorded
+        // ground just rereads that history — it doesn't undo or re-decide
+        // anything.
         if (cursorDistance > maxDistance) {
           const { consumed } = stepPath(pathState, cursorDistance - maxDistance, trackBuilder.junctions)
           maxDistance += consumed
@@ -227,6 +233,15 @@ export function createRailwayScene(canvas, controller) {
             distance: maxDistance,
             point: pathState.piece.curve.getPointAt(pathState.t),
             tangent: pathState.piece.curve.getTangentAt(pathState.t).multiplyScalar(pathState.direction),
+          })
+        } else if (cursorDistance < minDistance) {
+          const { consumed } = stepPath(backState, minDistance - cursorDistance, trackBuilder.junctions)
+          minDistance -= consumed
+          cursorDistance = minDistance // same dead-end clamp as the forward case, mirrored
+          history.unshift({
+            distance: minDistance,
+            point: backState.piece.curve.getPointAt(backState.t),
+            tangent: backState.piece.curve.getTangentAt(backState.t).multiplyScalar(backState.direction),
           })
         }
 
