@@ -6,6 +6,7 @@ import { createDeadEndMarker, disposeSharedDeadEndMaterial, setMarkerSelected } 
 import { linkPieceEnds, buildJunction } from './trackGraph.js'
 import { freeCandidates, forkCandidates } from './pieceCandidates.js'
 import { POINT_DIVERGE_ANGLE, Y_POINT_HALF_ANGLE } from './trackCatalogue.js'
+import { buildLayoutSnapshot, deserializeLayout } from './layoutSerializer.js'
 
 const SNAP_POSITION_TOLERANCE = 4 // metres — how close a piece's end has to land to another piece's curve to auto-join it, whether that lands it on a free end (a plain link) or mid-piece (a fork — see findConnection)
 const SNAP_ANGLE_TOLERANCE = THREE.MathUtils.degToRad(8) // how close to parallel (for a plain link) or to a real point/Y-point's diverge angle (for a fork) the two tangents have to be — catalogue pieces are rigid, nothing here ever bends to fit
@@ -137,7 +138,7 @@ function pickTangentSign(hostTangent, hostPoint, cursor) {
  * @param {HTMLElement} deps.domElement Canvas element to listen on.
  * @param {TrackPiece[]} deps.pieces Shared, mutable list of track pieces (including the starting layout); new pieces are pushed here, removed ones spliced out.
  * @param {(selection: {piece: TrackPiece, end: 'start' | 'end'} | null) => void} [deps.onSelectionChange] Called whenever the selected dangling end changes, so a host UI (the drawer) can reflect it.
- * @returns {{setEnabled: (value: boolean) => void, appendPiece: (key: string) => void, beginDrawerDrag: (key: string, isFork: boolean) => void, updateDrawerDrag: (clientX: number, clientY: number) => void, endDrawerDrag: (commit: boolean) => void, markInitialDanglingEnds: () => void, dispose: () => void, junctions: Junction[]}} Control handle, including the live junction list for the train's path walker.
+ * @returns {{setEnabled: (value: boolean) => void, appendPiece: (key: string) => void, beginDrawerDrag: (key: string, isFork: boolean) => void, updateDrawerDrag: (clientX: number, clientY: number) => void, endDrawerDrag: (commit: boolean) => void, markInitialDanglingEnds: () => void, getSnapshot: () => Object, loadLayout: (data: Object) => void, dispose: () => void, junctions: Junction[]}} Control handle, including the live junction list for the train's path walker.
  */
 export function createTrackBuilder({ scene, camera, domElement, pieces, onSelectionChange }) {
   const raycaster = new THREE.Raycaster()
@@ -432,6 +433,29 @@ export function createTrackBuilder({ scene, camera, domElement, pieces, onSelect
   }
 
   /**
+   * Wipes every piece, junction, and marker currently on the layout — the whole-scene equivalent of
+   * deletePiece, used right before loading a saved layout in to replace what's there now. Leaves `pieces`
+   * and `junctions` as the same (now-empty) array instances, since other code (createRailwayScene.js's
+   * train-position state, the piece inspector) holds onto those references directly.
+   *
+   * @returns {void}
+   */
+  function clearAllPieces() {
+    cancelDrawerDrag()
+    setSelection(null)
+    junctions.slice().forEach(disposeJunction)
+    pieces.forEach((piece) => {
+      scene.remove(piece.group)
+      disposeDeep(piece.group)
+      piece.pickMesh.geometry.dispose()
+      piece.pickMesh.material.dispose()
+      clearEndMarker(piece, 'start')
+      clearEndMarker(piece, 'end')
+    })
+    pieces.length = 0
+  }
+
+  /**
    * Updates the canvas cursor: a pointer over a dead-end marker (LAY mode only — click to select) or a
    * junction arrow (clickable in either mode), the default cursor otherwise.
    *
@@ -674,6 +698,38 @@ export function createTrackBuilder({ scene, camera, domElement, pieces, onSelect
      * layout's own forks, so its genuinely open ends get a marker too.
      */
     markInitialDanglingEnds,
+
+    /**
+     * Builds a JSON-safe snapshot of the current layout — see layoutSerializer.js's buildLayoutSnapshot.
+     * Ready to send straight to api/layouts/save.php.
+     *
+     * @returns {{pieces: Object[], junctions: Object[]}}
+     */
+    getSnapshot() {
+      return buildLayoutSnapshot(pieces, junctions)
+    },
+
+    /**
+     * Replaces the entire current layout with one loaded from the server — see layoutSerializer.js's
+     * deserializeLayout. Everything currently on the layout (including the starting one, if nothing's
+     * been saved over it yet) is wiped first; there's no merge.
+     *
+     * Callers also need to reset whatever they're tracking about the train's own position, since the
+     * piece/junction objects it was walking no longer exist — see createRailwayScene.js's loadLayout,
+     * which wraps this for exactly that reason.
+     *
+     * @param {Object} data As returned by api/layouts/load.php — `{pieces, junctions}`.
+     * @returns {void}
+     */
+    loadLayout(data) {
+      clearAllPieces()
+      const loaded = deserializeLayout(data, scene)
+      pieces.push(...loaded.pieces)
+      junctions.push(...loaded.junctions)
+      nextId = pieces.reduce((max, piece) => Math.max(max, piece.id), 0) + 1
+      nextJunctionId = junctions.reduce((max, junction) => Math.max(max, junction.id), 0) + 1
+      markInitialDanglingEnds()
+    },
 
     /**
      * Starts a drawer drag: picking up a catalogue item (free-end or fork) to drop somewhere on the

@@ -1,0 +1,6 @@
+# Blocks direct HTTP access to the DB config (PHP can still read it from disk — this only stops Apache
+# from serving it as a plain-text download). Pure Apache authorization rule, works under FastCGI/PHP-FPM
+# or mod_php alike.
+<FilesMatch "\.config\.json$">
+  Require all denied
+</FilesMatch>

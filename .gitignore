@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Server-side secrets (DB credentials) — never commit, see api/.config.example.json for the template
+api/.config.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

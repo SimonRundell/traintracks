@@ -72,7 +72,7 @@ function loadFormation(formation) {
  * @param {import('./trainController.js').TrainController} controller Shared throttle/direction state, read every frame.
  * @param {Object} [options]
  * @param {(selection: {piece: import('./trackBuilder.js').TrackPiece, end: 'start' | 'end'} | null) => void} [options.onSelectionChange] Forwarded to createTrackBuilder — called whenever the LAY-mode drawer's target end changes.
- * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>}} `dispose` stops the loop and frees GPU resources; `trackBuilder` is the live handle a host UI (the track drawer) drives.
+ * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>, loadLayout: (data: Object) => void}} `dispose` stops the loop and frees GPU resources; `trackBuilder` is the live handle a host UI (the track drawer) drives; `loadLayout` replaces the current layout with a saved one, resetting the train to its start.
  */
 export function createRailwayScene(canvas, controller, { onSelectionChange } = {}) {
   const scene = new THREE.Scene()
@@ -84,9 +84,6 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   // anything laid in LAY mode). trackBuilder pushes/splices this directly.
   const { pieces: layoutPieces, junctions: layoutJunctions } = buildDefaultLayout(scene)
   const pieces = [...layoutPieces]
-  // Looked up by id rather than assumed to be array index 0 — the train always starts on piece #0
-  // specifically, regardless of what order buildDefaultLayout happens to push pieces in.
-  const ovalPiece = layoutPieces.find((piece) => piece.id === 0)
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a3a, 1.1))
   const sun = new THREE.DirectionalLight(0xffffff, 1.6)
@@ -139,40 +136,65 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   // units are placed by reading the same history at their coupling offset
   // behind the lead, so the whole train follows exactly what the front of it
   // actually did, through however many pieces and junctions that involved.
-  const pathState = { piece: ovalPiece, t: 1, direction: 1 }
-  const initialPose = { distance: 0, point: ovalPiece.curve.getPointAt(1), tangent: ovalPiece.curve.getTangentAt(1) }
-  const history = [initialPose]
+  //
+  // All of this gets torn down and rebuilt by resetTrainState (below) whenever a new layout loads in —
+  // the piece/junction objects the train was walking won't exist any more, so its position has to start
+  // fresh rather than try to carry over.
+  const pathState = { piece: null, t: 1, direction: 1 }
+  const backState = { piece: null, t: 1, direction: -1 }
+  const history = []
   let cursorDistance = 0
   let maxDistance = 0
   let minDistance = 0
-  // Walks backward on demand, same as pathState walks forward — see the mirrored minDistance block in
-  // animate() below. Starts at the same spot as pathState; backfilling (next) just runs it ahead of time
-  // for however far the train's own length needs, so trailing units have real poses from frame one.
-  const backState = { piece: ovalPiece, t: 1, direction: -1 }
 
-  // Backfill history behind distance 0 along the oval (no other track exists
-  // yet), so trailing units read valid poses from the very first frame
-  // instead of starting bunched up at the lead's position and only spreading
-  // into formation once the lead has travelled the train's own length.
-  const maxCouplingOffset = couplingOffsets[couplingOffsets.length - 1] ?? 0
-  if (maxCouplingOffset > 0) {
-    const BACKFILL_STEP = 1 // metres between backfilled samples
-    const backfillSamples = []
-    let walked = 0
-    while (walked < maxCouplingOffset) {
-      const step = Math.min(BACKFILL_STEP, maxCouplingOffset - walked)
-      stepPath(backState, step, [])
-      walked += step
-      backfillSamples.push({
-        distance: -walked,
-        point: backState.piece.curve.getPointAt(backState.t),
-        tangent: backState.piece.curve.getTangentAt(backState.t).multiplyScalar(backState.direction),
-      })
+  /**
+   * (Re)sets the train's position to the start of whatever's currently piece #0 (or, failing that, just
+   * the first piece) — t=1, facing forward — and rebuilds its backfilled history so trailing units read
+   * valid poses from the very first frame instead of starting bunched up at the lead's position. Called
+   * once at startup, and again by loadLayout after a saved layout replaces the current one.
+   *
+   * @returns {void}
+   */
+  function resetTrainState() {
+    const startPiece = pieces.find((piece) => piece.id === 0) ?? pieces[0]
+    pathState.piece = startPiece
+    pathState.t = 1
+    pathState.direction = 1
+    backState.piece = startPiece
+    backState.t = 1
+    backState.direction = -1
+
+    history.length = 0
+    history.push({ distance: 0, point: startPiece.curve.getPointAt(1), tangent: startPiece.curve.getTangentAt(1) })
+    cursorDistance = 0
+    maxDistance = 0
+    minDistance = 0
+
+    // Backfill history behind distance 0 (no other track exists yet, from the train's perspective), so
+    // trailing units read valid poses from the very first frame instead of starting bunched up at the
+    // lead's position and only spreading into formation once the lead has travelled the train's own
+    // length.
+    const maxCouplingOffset = couplingOffsets[couplingOffsets.length - 1] ?? 0
+    if (maxCouplingOffset > 0) {
+      const BACKFILL_STEP = 1 // metres between backfilled samples
+      const backfillSamples = []
+      let walked = 0
+      while (walked < maxCouplingOffset) {
+        const step = Math.min(BACKFILL_STEP, maxCouplingOffset - walked)
+        stepPath(backState, step, [])
+        walked += step
+        backfillSamples.push({
+          distance: -walked,
+          point: backState.piece.curve.getPointAt(backState.t),
+          tangent: backState.piece.curve.getTangentAt(backState.t).multiplyScalar(backState.direction),
+        })
+      }
+      backfillSamples.reverse() // ascending order: most negative first, ending just before distance 0
+      history.unshift(...backfillSamples)
+      minDistance = -walked
     }
-    backfillSamples.reverse() // ascending order: most negative first, ending just before distance 0
-    history.unshift(...backfillSamples)
-    minDistance = -walked
   }
+  resetTrainState()
 
   let units = null
   let disposed = false
@@ -295,5 +317,19 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
     })
   }
 
-  return { dispose, trackBuilder }
+  /**
+   * Replaces the current layout with a saved one and resets the train to its start — see
+   * trackBuilder.js's own loadLayout for the track/junction half of this, and resetTrainState above for
+   * the other half (the train's old pathState/backState/history all refer to piece and junction objects
+   * that loadLayout is about to throw away).
+   *
+   * @param {Object} data As returned by api/layouts/load.php — `{pieces, junctions}`.
+   * @returns {void}
+   */
+  function loadLayout(data) {
+    trackBuilder.loadLayout(data)
+    resetTrainState()
+  }
+
+  return { dispose, trackBuilder, loadLayout }
 }

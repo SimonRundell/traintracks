@@ -4,27 +4,33 @@ import TrackDrawer from './TrackDrawer.jsx'
 
 /**
  * Mounts the Three.js railway scene into a full-size canvas and tears it down again on unmount. While in
- * LAY mode, also renders the track drawer overlay, wired directly to the live trackBuilder instance the
- * scene created.
+ * LAY mode, also renders the track drawer overlay, wired directly to the live scene handle
+ * createRailwayScene returned.
+ *
+ * The scene handle is also reported up via onSceneReady, since App.jsx's top menu bar (My Layouts) needs
+ * it too and is a sibling, not a child, of this component.
  *
  * @param {Object} props
  * @param {import('../railway/trainController.js').TrainController} props.controller Shared throttle/direction/mode state for the running loco.
  * @param {'play' | 'lay'} props.mode Current sim mode — mirrors controller.mode, lifted to a prop so this component re-renders when it changes (the controller itself is a plain mutable object, not reactive).
- * @returns {JSX.Element} The canvas element hosting the WebGL scene, plus the LAY-mode drawer when active.
+ * @param {(scene: ReturnType<typeof createRailwayScene> | null) => void} [props.onSceneReady] Called with the live scene handle once created, and with null just before it's disposed.
+ * @returns {JSX.Element} The canvas element hosting the WebGL scene, plus the LAY-mode drawer overlay.
  */
-export default function RailwayViewport({ controller, mode }) {
+export default function RailwayViewport({ controller, mode, onSceneReady }) {
   const canvasRef = useRef(null)
-  const trackBuilderRef = useRef(null)
+  const sceneRef = useRef(null)
   const [hasSelection, setHasSelection] = useState(false)
 
   useEffect(() => {
-    const { dispose, trackBuilder } = createRailwayScene(canvasRef.current, controller, {
+    const scene = createRailwayScene(canvasRef.current, controller, {
       onSelectionChange: (selection) => setHasSelection(Boolean(selection)),
     })
-    trackBuilderRef.current = trackBuilder
+    sceneRef.current = scene
+    onSceneReady?.(scene)
     return () => {
-      trackBuilderRef.current = null
-      dispose()
+      sceneRef.current = null
+      onSceneReady?.(null)
+      scene.dispose()
     }
   }, [controller])
 
@@ -34,10 +40,10 @@ export default function RailwayViewport({ controller, mode }) {
       {mode === 'lay' && (
         <TrackDrawer
           hasSelection={hasSelection}
-          onPick={(key) => trackBuilderRef.current?.appendPiece(key)}
-          onDragStart={(key, isFork) => trackBuilderRef.current?.beginDrawerDrag(key, isFork)}
-          onDragMove={(x, y) => trackBuilderRef.current?.updateDrawerDrag(x, y)}
-          onDragEnd={(commit) => trackBuilderRef.current?.endDrawerDrag(commit)}
+          onPick={(key) => sceneRef.current?.trackBuilder.appendPiece(key)}
+          onDragStart={(key, isFork) => sceneRef.current?.trackBuilder.beginDrawerDrag(key, isFork)}
+          onDragMove={(x, y) => sceneRef.current?.trackBuilder.updateDrawerDrag(x, y)}
+          onDragEnd={(commit) => sceneRef.current?.trackBuilder.endDrawerDrag(commit)}
         />
       )}
     </>
