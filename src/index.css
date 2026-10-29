@@ -27,6 +27,71 @@ body {
   height: 100%;
 }
 
+.track-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 220px;
+  overflow-y: auto;
+  background: rgba(16, 18, 24, 0.88);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  user-select: none;
+  z-index: 10; /* above .train-control-panel, which would otherwise paint over the drawer's bottom edge */
+}
+
+.track-drawer-hint {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.track-drawer-section-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin: -4px 0 -6px;
+}
+
+.track-drawer-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.track-drawer-item {
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #1c1f26;
+  color: #e5e7eb;
+  font: 13px ui-monospace, 'Courier New', monospace;
+  cursor: grab;
+  text-align: left;
+  touch-action: none;
+}
+
+.track-drawer-item:hover {
+  background: #2a2e38;
+  border-color: #e8b339;
+}
+
+.track-drawer-item:active {
+  cursor: grabbing;
+}
+
+/* Clicking does nothing yet (no end selected) — still fully draggable, so only dimmed, never disabled. */
+.track-drawer-item-click-disabled {
+  opacity: 0.5;
+}
+
 .train-control-panel {
   position: fixed;
   left: 0;

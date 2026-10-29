@@ -63,8 +63,8 @@ export function buildDefaultLayout(scene) {
       closed: false,
       group,
       pickMesh,
-      junctions: [],
       links: { start: null, end: null },
+      markers: { start: null, end: null },
       type, // catalogue item this piece represents, e.g. "curve-3-left" — see pieceCandidates.js's matching labels; shown in the piece inspector's hover label
     }
     const previous = after ?? pieces[pieces.length - 1]

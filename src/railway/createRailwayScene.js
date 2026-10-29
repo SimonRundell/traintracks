@@ -70,9 +70,11 @@ function loadFormation(formation) {
  *
  * @param {HTMLCanvasElement} canvas Target canvas element, sized by CSS to its container.
  * @param {import('./trainController.js').TrainController} controller Shared throttle/direction state, read every frame.
- * @returns {() => void} Dispose function that stops the loop and frees GPU resources.
+ * @param {Object} [options]
+ * @param {(selection: {piece: import('./trackBuilder.js').TrackPiece, end: 'start' | 'end'} | null) => void} [options.onSelectionChange] Forwarded to createTrackBuilder — called whenever the LAY-mode drawer's target end changes.
+ * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>}} `dispose` stops the loop and frees GPU resources; `trackBuilder` is the live handle a host UI (the track drawer) drives.
  */
-export function createRailwayScene(canvas, controller) {
+export function createRailwayScene(canvas, controller, { onSelectionChange } = {}) {
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(0x202531)
 
@@ -123,10 +125,11 @@ export function createRailwayScene(canvas, controller) {
     scene,
     camera,
     domElement: renderer.domElement,
-    controls,
     pieces,
+    onSelectionChange,
   })
   trackBuilder.junctions.push(...layoutJunctions) // seed with the default layout's station points, so they're switchable and the path walker sees them just like a hand-built fork
+  trackBuilder.markInitialDanglingEnds() // the layout's own genuinely open ends (the siding's stub) need a marker too, not just ones built interactively afterwards
   const pieceInspector = createPieceInspector({ camera, domElement: renderer.domElement, pieces })
   // The lead unit's position is tracked as a walk through the track graph
   // (piece + parameter + direction), stepped forward by stepPath whenever it
@@ -270,7 +273,7 @@ export function createRailwayScene(canvas, controller) {
     frameId = requestAnimationFrame(animate)
   }
 
-  return function dispose() {
+  function dispose() {
     disposed = true
     cancelAnimationFrame(frameId)
     resizeObserver.disconnect()
@@ -291,4 +294,6 @@ export function createRailwayScene(canvas, controller) {
       }
     })
   }
+
+  return { dispose, trackBuilder }
 }

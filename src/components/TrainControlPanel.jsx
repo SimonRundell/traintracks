@@ -192,15 +192,19 @@ function ModeSwitch({ mode, onChange }) {
  * immediately. The throttle and direction controls dim in LAY mode, since
  * the train is off the track while building.
  *
+ * `mode` itself is a prop rather than local state (unlike the other controls here) — RailwayViewport
+ * needs it too, to decide whether to show the LAY-mode track drawer, so it's owned by their shared parent.
+ *
  * @param {Object} props
  * @param {import('../railway/trainController.js').TrainController} props.controller Shared controller state.
+ * @param {'play' | 'lay'} props.mode Current sim mode.
+ * @param {(mode: 'play' | 'lay') => void} props.onModeChange Called with the new mode when toggled.
  * @returns {JSX.Element} The control panel bar.
  */
-export default function TrainControlPanel({ controller }) {
+export default function TrainControlPanel({ controller, mode, onModeChange }) {
   const [speedFraction, setSpeedFraction] = useState(controller.speedFraction)
   const [direction, setDirection] = useState(controller.direction)
   const [cameraMode, setCameraMode] = useState(controller.cameraMode)
-  const [mode, setMode] = useState(controller.mode)
 
   const handleSpeedChange = useCallback(
     (value) => {
@@ -226,14 +230,6 @@ export default function TrainControlPanel({ controller }) {
     [controller],
   )
 
-  const handleModeChange = useCallback(
-    (value) => {
-      controller.mode = value
-      setMode(value)
-    },
-    [controller],
-  )
-
   return (
     <div className="train-control-panel">
       <div className={mode === 'lay' ? 'train-controls-group inactive' : 'train-controls-group'}>
@@ -241,7 +237,7 @@ export default function TrainControlPanel({ controller }) {
         <DirectionSwitch direction={direction} onChange={handleDirectionChange} />
       </div>
       <CameraSwitch cameraMode={cameraMode} onChange={handleCameraModeChange} />
-      <ModeSwitch mode={mode} onChange={handleModeChange} />
+      <ModeSwitch mode={mode} onChange={onModeChange} />
     </div>
   )
 }

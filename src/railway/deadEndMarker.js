@@ -3,8 +3,10 @@ import * as THREE from 'three'
 const MARKER_HEIGHT = 3.2 // metres above rail — low enough to read as sitting on the track, distinct from the taller junction arrows
 const MARKER_RADIUS = 0.6
 const MARKER_COLOR = 0xef4444 // warning red — unmistakably different from the amber/grey junction arrow palette
+const SELECTED_COLOR = 0xfbbf24 // amber — the app's existing "active control" accent colour, distinct from the warning red
 
 let material = null
+let selectedMaterial = null
 
 /**
  * Lazily creates (and caches) the shared marker material.
@@ -19,11 +21,24 @@ function getMaterial() {
 }
 
 /**
+ * Lazily creates (and caches) the shared "selected" marker material — see setMarkerSelected.
+ *
+ * @returns {THREE.Material} Shared material.
+ */
+function getSelectedMaterial() {
+  if (!selectedMaterial) {
+    selectedMaterial = new THREE.MeshStandardMaterial({ color: SELECTED_COLOR, emissive: SELECTED_COLOR, emissiveIntensity: 0.8, roughness: 0.4 })
+  }
+  return selectedMaterial
+}
+
+/**
  * Builds a small floating marker flagging a track end that doesn't connect to anything — either a
- * deliberate dead end (a siding, say) or a rejoin that didn't actually line up. Purely informational, no
- * pick target of its own; trackBuilder.js adds/removes these directly as TrackPiece.links changes, so a
- * piece's connectivity is visible at a glance the moment it's laid, not just discovered later by driving
- * into it.
+ * deliberate dead end (a siding, say) or a rejoin that didn't actually line up. trackBuilder.js
+ * adds/removes these directly as TrackPiece.links changes, so a piece's connectivity is visible at a
+ * glance the moment it's laid, not just discovered later by driving into it. Also a real pick target in
+ * LAY mode now — clicking one selects it as the end the track drawer's next piece gets appended to (see
+ * setMarkerSelected).
  *
  * @param {THREE.Vector3} position World point to float above.
  * @returns {THREE.Mesh} The marker mesh, not yet added to a scene.
@@ -36,7 +51,21 @@ export function createDeadEndMarker(position) {
 }
 
 /**
- * Frees the shared marker material. Only safe once nothing will create another marker afterwards (e.g.
+ * Switches a marker between its normal (unselected) and highlighted (selected) appearance. Swaps between
+ * two shared materials rather than mutating one in place, since every other marker must keep reading as
+ * plain "unconnected" while only the active one reads as "selected".
+ *
+ * @param {THREE.Mesh | null} mesh A marker built by createDeadEndMarker, or null (a harmless no-op).
+ * @param {boolean} selected True to show the highlighted appearance.
+ * @returns {void}
+ */
+export function setMarkerSelected(mesh, selected) {
+  if (!mesh) return
+  mesh.material = selected ? getSelectedMaterial() : getMaterial()
+}
+
+/**
+ * Frees the shared marker materials. Only safe once nothing will create another marker afterwards (e.g.
  * on full scene teardown).
  *
  * @returns {void}
@@ -44,4 +73,6 @@ export function createDeadEndMarker(position) {
 export function disposeSharedDeadEndMaterial() {
   material?.dispose()
   material = null
+  selectedMaterial?.dispose()
+  selectedMaterial = null
 }

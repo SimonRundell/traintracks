@@ -59,6 +59,47 @@ export function forkCandidates(start, tangent) {
 }
 
 /**
+ * @typedef {Object} FreeMenuItem
+ * @property {string} key Matches a freeCandidates() label exactly — pass straight to trackBuilder.js's
+ *   appendPiece.
+ * @property {string} label Human-readable name for a drawer button.
+ */
+
+/**
+ * Lists every catalogue item the drawer can offer for a plain, free-end continuation — the same set
+ * freeCandidates() can build, but without needing a start point/tangent, since the drawer only needs to
+ * list what's available, not place anything yet.
+ *
+ * @returns {FreeMenuItem[]}
+ */
+export function freeCandidateMenu() {
+  const items = []
+  for (const name of Object.keys(STRAIGHT_LENGTHS)) {
+    items.push({ key: `straight-${name}`, label: `Straight (${name})` })
+  }
+  for (const radiusIndex of Object.keys(CURVE_RADII)) {
+    items.push({ key: `curve-${radiusIndex}-left`, label: `Curve ${radiusIndex} (left)` })
+    items.push({ key: `curve-${radiusIndex}-right`, label: `Curve ${radiusIndex} (right)` })
+  }
+  return items
+}
+
+/**
+ * Lists every catalogue item the drawer can offer for a fork's diverging road — the same four
+ * forkCandidates() can build, but without needing a toe point/tangent.
+ *
+ * @returns {FreeMenuItem[]}
+ */
+export function forkCandidateMenu() {
+  return [
+    { key: 'point-left', label: 'Point (left)' },
+    { key: 'point-right', label: 'Point (right)' },
+    { key: 'y-left', label: 'Y-point (left)' },
+    { key: 'y-right', label: 'Y-point (right)' },
+  ]
+}
+
+/**
  * Picks whichever candidate's endpoint lands closest to a live target point — the core of "drag toward
  * where you want to go and the nearest real piece snaps into place".
  *
