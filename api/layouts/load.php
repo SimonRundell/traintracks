@@ -20,13 +20,19 @@ $assetsStmt->execute([$layoutId]);
 
 $pieces = [];
 $junctions = [];
+$platforms = [];
+$stations = [];
 foreach ($assetsStmt->fetchAll() as $row) {
     $data = json_decode($row['data'], true);
     if ($row['asset_type'] === 'track_piece') {
         $pieces[] = $data;
     } elseif ($row['asset_type'] === 'junction') {
         $junctions[] = $data;
+    } elseif ($row['asset_type'] === 'platform') {
+        $platforms[] = $data;
+    } elseif ($row['asset_type'] === 'station') {
+        $stations[] = $data;
     }
 }
 
-respond(['layout' => $layout, 'pieces' => $pieces, 'junctions' => $junctions]);
+respond(['layout' => $layout, 'pieces' => $pieces, 'junctions' => $junctions, 'platforms' => $platforms, 'stations' => $stations]);

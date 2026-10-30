@@ -17,6 +17,7 @@ function fromHornbyMm(mm) {
 
 // Straights (THREE.LineCurve3 is exact — no spline approximation needed for a straight).
 export const STRAIGHT_LENGTHS = {
+  half: fromHornbyMm(84), // half the standard straight — not a distinct Hornby item, inferred the same way curve-5/6's radii are (see CURVE_RADII)
   standard: fromHornbyMm(168), // R600 standard straight
   double: fromHornbyMm(335), // R601 double straight
   long: fromHornbyMm(970), // R621 flexible track, used here as the "long straight"
@@ -36,6 +37,16 @@ export const CURVE_RADII = {
   6: fromHornbyMm(707.5), // extrapolated 6th radius (see above) — no official Hornby code
 }
 export const CURVE_ANGLE = THREE.MathUtils.degToRad(22.5) // every Setrack single-curve section turns 22.5°
+
+// Half- and double-length curve variants: the same radius (so the same bend), just turning through half
+// or double the standard 22.5° arc. Not distinct Hornby items — inferred from the standard angle the same
+// way curve-5/6's radii are extrapolated from the real 1st-4th radius progression (see CURVE_RADII) —
+// useful for landing a curved run on an angle that doesn't divide evenly into 22.5° steps.
+export const CURVE_ANGLES = {
+  half: CURVE_ANGLE / 2,
+  standard: CURVE_ANGLE,
+  double: CURVE_ANGLE * 2,
+}
 
 // Points (turnouts). R8072/R8073 left/right-hand standard points: a straight through road the same
 // length as a standard straight, plus a diverging road that's a 2nd-radius, 22.5° curve off the toe.
@@ -106,16 +117,18 @@ export function placeArc(start, tangent, radius, angle, side) {
 }
 
 /**
- * Places a single (22.5°) Setrack curve of the given radius index.
+ * Places a single Setrack curve of the given radius index, turning through `angle` (standard 22.5° by
+ * default — see CURVE_ANGLES for the half/double variants).
  *
  * @param {THREE.Vector3} start World-space start point.
  * @param {THREE.Vector3} tangent Unit heading to travel in.
- * @param {1 | 2 | 3 | 4 | 6} radiusIndex Which catalogue radius to use — see CURVE_RADII.
+ * @param {1 | 2 | 3 | 4 | 5 | 6} radiusIndex Which catalogue radius to use — see CURVE_RADII.
  * @param {1 | -1} side Which way the curve bends: 1 = left, -1 = right.
+ * @param {number} [angle] Arc angle in radians — see CURVE_ANGLES.
  * @returns {PlacedRoad} The placed road.
  */
-export function placeCurve(start, tangent, radiusIndex, side) {
-  return placeArc(start, tangent, CURVE_RADII[radiusIndex], CURVE_ANGLE, side)
+export function placeCurve(start, tangent, radiusIndex, side, angle = CURVE_ANGLE) {
+  return placeArc(start, tangent, CURVE_RADII[radiusIndex], angle, side)
 }
 
 /**

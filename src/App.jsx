@@ -51,7 +51,7 @@ function App() {
       <AppMenuBar
         user={user}
         onLogout={handleLogout}
-        getSnapshot={() => scene?.trackBuilder.getSnapshot()}
+        getSnapshot={() => scene?.getSnapshot()}
         onLoadLayout={(data) => scene?.loadLayout(data)}
       />
       <TrainControlPanel controller={controller} mode={mode} onModeChange={handleModeChange} />

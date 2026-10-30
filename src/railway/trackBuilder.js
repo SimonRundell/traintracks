@@ -6,7 +6,7 @@ import { createDeadEndMarker, disposeSharedDeadEndMaterial, setMarkerSelected } 
 import { linkPieceEnds, buildJunction } from './trackGraph.js'
 import { freeCandidates, forkCandidates } from './pieceCandidates.js'
 import { POINT_DIVERGE_ANGLE, Y_POINT_HALF_ANGLE } from './trackCatalogue.js'
-import { buildLayoutSnapshot, deserializeLayout } from './layoutSerializer.js'
+import { serializePiece, serializeJunction, deserializeLayout } from './layoutSerializer.js'
 
 const SNAP_POSITION_TOLERANCE = 4 // metres — how close a piece's end has to land to another piece's curve to auto-join it, whether that lands it on a free end (a plain link) or mid-piece (a fork — see findConnection)
 const SNAP_ANGLE_TOLERANCE = THREE.MathUtils.degToRad(8) // how close to parallel (for a plain link) or to a real point/Y-point's diverge angle (for a fork) the two tangents have to be — catalogue pieces are rigid, nothing here ever bends to fit
@@ -700,13 +700,14 @@ export function createTrackBuilder({ scene, camera, domElement, pieces, onSelect
     markInitialDanglingEnds,
 
     /**
-     * Builds a JSON-safe snapshot of the current layout — see layoutSerializer.js's buildLayoutSnapshot.
-     * Ready to send straight to api/layouts/save.php.
+     * Builds a JSON-safe snapshot of the current track network (pieces and junctions only — platforms are
+     * a separate asset type, see platformBuilder.js and createRailwayScene.js's own getSnapshot, which
+     * combines both for saving).
      *
      * @returns {{pieces: Object[], junctions: Object[]}}
      */
     getSnapshot() {
-      return buildLayoutSnapshot(pieces, junctions)
+      return { pieces: pieces.map(serializePiece), junctions: junctions.map(serializeJunction) }
     },
 
     /**

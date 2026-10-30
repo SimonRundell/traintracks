@@ -4,8 +4,11 @@ import { buildDefaultLayout } from './defaultLayout.js'
 import { loadModel, placeAtPose } from './rollingStock.js'
 import { HST_FORMATION, computeCouplingOffsets } from './consist.js'
 import { createTrackBuilder } from './trackBuilder.js'
+import { createPlatformBuilder } from './platformBuilder.js'
+import { createStationBuilder } from './stationBuilder.js'
 import { createPieceInspector } from './pieceInspector.js'
 import { stepPath } from './pathWalker.js'
+import { buildLayoutSnapshot, deserializePlatforms, deserializeStations } from './layoutSerializer.js'
 
 const MAX_LOCO_SPEED = 16 // metres per second at full throttle
 const ISO_VIEW_SIZE = 135
@@ -72,7 +75,7 @@ function loadFormation(formation) {
  * @param {import('./trainController.js').TrainController} controller Shared throttle/direction state, read every frame.
  * @param {Object} [options]
  * @param {(selection: {piece: import('./trackBuilder.js').TrackPiece, end: 'start' | 'end'} | null) => void} [options.onSelectionChange] Forwarded to createTrackBuilder — called whenever the LAY-mode drawer's target end changes.
- * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>, loadLayout: (data: Object) => void}} `dispose` stops the loop and frees GPU resources; `trackBuilder` is the live handle a host UI (the track drawer) drives; `loadLayout` replaces the current layout with a saved one, resetting the train to its start.
+ * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>, platformBuilder: ReturnType<typeof import('./platformBuilder.js').createPlatformBuilder>, loadLayout: (data: Object) => void, getSnapshot: () => Object}} `dispose` stops the loop and frees GPU resources; `trackBuilder`/`platformBuilder` are the live handles a host UI (the track drawer) drives; `getSnapshot`/`loadLayout` save and load the whole layout (track and platforms together).
  */
 export function createRailwayScene(canvas, controller, { onSelectionChange } = {}) {
   const scene = new THREE.Scene()
@@ -84,6 +87,12 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   // anything laid in LAY mode). trackBuilder pushes/splices this directly.
   const { pieces: layoutPieces, junctions: layoutJunctions } = buildDefaultLayout(scene)
   const pieces = [...layoutPieces]
+  // Shared, mutable list of every platform section — empty at startup (see defaultLayout.js's doc
+  // comment); platformBuilder.js pushes/splices this directly, same as trackBuilder.js does for `pieces`.
+  const platforms = []
+  // Shared, mutable list of every placed station building — also empty at startup; stationBuilder.js
+  // pushes/splices this directly, mirroring platforms.
+  const stations = []
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a3a, 1.1))
   const sun = new THREE.DirectionalLight(0xffffff, 1.6)
@@ -127,6 +136,8 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   })
   trackBuilder.junctions.push(...layoutJunctions) // seed with the default layout's station points, so they're switchable and the path walker sees them just like a hand-built fork
   trackBuilder.markInitialDanglingEnds() // the layout's own genuinely open ends (the siding's stub) need a marker too, not just ones built interactively afterwards
+  const platformBuilder = createPlatformBuilder({ scene, camera, domElement: renderer.domElement, pieces, platforms })
+  const stationBuilder = createStationBuilder({ scene, camera, domElement: renderer.domElement, platforms, stations })
   const pieceInspector = createPieceInspector({ camera, domElement: renderer.domElement, pieces })
   // The lead unit's position is tracked as a walk through the track graph
   // (piece + parameter + direction), stepped forward by stepPath whenever it
@@ -230,6 +241,8 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
 
     const laying = controller.mode === 'lay'
     trackBuilder.setEnabled(laying)
+    platformBuilder.setEnabled(laying)
+    stationBuilder.setEnabled(laying)
 
     if (units) {
       units.forEach((model) => {
@@ -300,6 +313,8 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
     cancelAnimationFrame(frameId)
     resizeObserver.disconnect()
     trackBuilder.dispose()
+    platformBuilder.dispose()
+    stationBuilder.dispose()
     pieceInspector.dispose()
     // Pick meshes live outside the scene graph, so the traversal below won't reach them.
     pieces.forEach((piece) => {
@@ -318,18 +333,47 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   }
 
   /**
-   * Replaces the current layout with a saved one and resets the train to its start — see
-   * trackBuilder.js's own loadLayout for the track/junction half of this, and resetTrainState above for
-   * the other half (the train's old pathState/backState/history all refer to piece and junction objects
-   * that loadLayout is about to throw away).
+   * Builds a JSON-safe snapshot of the whole current layout — track network, platform sections, and
+   * station buildings — ready to send straight to api/layouts/save.php.
    *
-   * @param {Object} data As returned by api/layouts/load.php — `{pieces, junctions}`.
+   * @returns {{pieces: Object[], junctions: Object[], platforms: Object[], stations: Object[]}}
+   */
+  function getSnapshot() {
+    return buildLayoutSnapshot(pieces, trackBuilder.junctions, platforms, stations)
+  }
+
+  /**
+   * Replaces the current layout with a saved one and resets the train to its start. Combines
+   * trackBuilder.js's own loadLayout (the track/junction half) with the platform and station halves
+   * (neither belongs to trackBuilder.js, so both are handled directly here) and resetTrainState above (the
+   * train's old pathState/backState/history all refer to piece and junction objects that loadLayout is
+   * about to throw away).
+   *
+   * Station models load asynchronously (see deserializeStations), so unlike the rest of the layout they
+   * appear a moment after everything else — the same way the running train's own rolling stock already
+   * does at startup (see loadFormation below).
+   *
+   * @param {Object} data As returned by api/layouts/load.php — `{pieces, junctions, platforms, stations}`.
    * @returns {void}
    */
   function loadLayout(data) {
     trackBuilder.loadLayout(data)
+    platforms.forEach((platform) => {
+      scene.remove(platform.mesh)
+      platform.mesh.geometry.dispose()
+    })
+    platforms.length = 0
+    platforms.push(...deserializePlatforms(data.platforms ?? [], scene))
+
+    stations.forEach((station) => scene.remove(station.group))
+    stations.length = 0
+    deserializeStations(data.stations ?? [], scene).then((loaded) => {
+      if (disposed) return
+      stations.push(...loaded)
+    })
+
     resetTrainState()
   }
 
-  return { dispose, trackBuilder, loadLayout }
+  return { dispose, trackBuilder, platformBuilder, stationBuilder, loadLayout, getSnapshot }
 }

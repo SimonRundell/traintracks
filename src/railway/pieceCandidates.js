@@ -1,7 +1,7 @@
 import {
   STRAIGHT_LENGTHS,
   CURVE_RADII,
-  CURVE_ANGLE,
+  CURVE_ANGLES,
   POINT_DIVERGE_RADIUS,
   POINT_DIVERGE_ANGLE,
   Y_POINT_RADIUS,
@@ -16,11 +16,20 @@ import {
  * @property {import('./trackCatalogue.js').PlacedRoad} road The placed geometry.
  */
 
+// The standard variant's key/label carry no extra infix (`curve-3-left`, "Curve 3 (left)"), to match the
+// keys already saved in people's layouts from before half/double curves existed — only half and double
+// get one (`curve-3-half-left`, "Curve 3 Half (left)").
+const CURVE_LENGTH_VARIANTS = [
+  { keyInfix: '', labelInfix: '', angle: CURVE_ANGLES.standard },
+  { keyInfix: '-half', labelInfix: 'Half ', angle: CURVE_ANGLES.half },
+  { keyInfix: '-double', labelInfix: 'Double ', angle: CURVE_ANGLES.double },
+]
+
 /**
  * Every piece the drag tool can lay as a plain, switch-free continuation from a free end — every
- * straight length, and every curve radius bending either way. There's no "point" item involved in a
- * plain continuation; those only exist at a genuine fork (see forkCandidates), since a real point is a
- * physical item with two roads, not just a tighter curve.
+ * straight length, and every curve radius/length-variant bending either way. There's no "point" item
+ * involved in a plain continuation; those only exist at a genuine fork (see forkCandidates), since a real
+ * point is a physical item with two roads, not just a tighter curve.
  *
  * @param {THREE.Vector3} start World-space start point.
  * @param {THREE.Vector3} tangent Unit heading to build away from.
@@ -32,8 +41,10 @@ export function freeCandidates(start, tangent) {
     candidates.push({ label: `straight-${name}`, road: placeStraight(start, tangent, length) })
   }
   for (const radiusIndex of Object.keys(CURVE_RADII)) {
-    candidates.push({ label: `curve-${radiusIndex}-left`, road: placeArc(start, tangent, CURVE_RADII[radiusIndex], CURVE_ANGLE, 1) })
-    candidates.push({ label: `curve-${radiusIndex}-right`, road: placeArc(start, tangent, CURVE_RADII[radiusIndex], CURVE_ANGLE, -1) })
+    for (const variant of CURVE_LENGTH_VARIANTS) {
+      candidates.push({ label: `curve-${radiusIndex}${variant.keyInfix}-left`, road: placeArc(start, tangent, CURVE_RADII[radiusIndex], variant.angle, 1) })
+      candidates.push({ label: `curve-${radiusIndex}${variant.keyInfix}-right`, road: placeArc(start, tangent, CURVE_RADII[radiusIndex], variant.angle, -1) })
+    }
   }
   return candidates
 }
@@ -78,8 +89,10 @@ export function freeCandidateMenu() {
     items.push({ key: `straight-${name}`, label: `Straight (${name})` })
   }
   for (const radiusIndex of Object.keys(CURVE_RADII)) {
-    items.push({ key: `curve-${radiusIndex}-left`, label: `Curve ${radiusIndex} (left)` })
-    items.push({ key: `curve-${radiusIndex}-right`, label: `Curve ${radiusIndex} (right)` })
+    for (const variant of CURVE_LENGTH_VARIANTS) {
+      items.push({ key: `curve-${radiusIndex}${variant.keyInfix}-left`, label: `Curve ${radiusIndex} ${variant.labelInfix}(left)` })
+      items.push({ key: `curve-${radiusIndex}${variant.keyInfix}-right`, label: `Curve ${radiusIndex} ${variant.labelInfix}(right)` })
+    }
   }
   return items
 }

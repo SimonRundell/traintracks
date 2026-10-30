@@ -5,7 +5,9 @@ import TrackDrawer from './TrackDrawer.jsx'
 /**
  * Mounts the Three.js railway scene into a full-size canvas and tears it down again on unmount. While in
  * LAY mode, also renders the track drawer overlay, wired directly to the live scene handle
- * createRailwayScene returned.
+ * createRailwayScene returned — track/fork items drive trackBuilder, platform items drive
+ * platformBuilder, station items drive stationBuilder, routed by the drawer item's `kind` (see
+ * TrackDrawer.jsx).
  *
  * The scene handle is also reported up via onSceneReady, since App.jsx's top menu bar (My Layouts) needs
  * it too and is a sibling, not a child, of this component.
@@ -19,6 +21,7 @@ import TrackDrawer from './TrackDrawer.jsx'
 export default function RailwayViewport({ controller, mode, onSceneReady }) {
   const canvasRef = useRef(null)
   const sceneRef = useRef(null)
+  const dragKindRef = useRef(null) // which builder the in-progress drag belongs to, so move/end route to the same one begin did
   const [hasSelection, setHasSelection] = useState(false)
 
   useEffect(() => {
@@ -41,9 +44,23 @@ export default function RailwayViewport({ controller, mode, onSceneReady }) {
         <TrackDrawer
           hasSelection={hasSelection}
           onPick={(key) => sceneRef.current?.trackBuilder.appendPiece(key)}
-          onDragStart={(key, isFork) => sceneRef.current?.trackBuilder.beginDrawerDrag(key, isFork)}
-          onDragMove={(x, y) => sceneRef.current?.trackBuilder.updateDrawerDrag(x, y)}
-          onDragEnd={(commit) => sceneRef.current?.trackBuilder.endDrawerDrag(commit)}
+          onDragStart={(key, kind) => {
+            dragKindRef.current = kind
+            if (kind === 'platform') sceneRef.current?.platformBuilder.beginDrag(key)
+            else if (kind === 'station') sceneRef.current?.stationBuilder.beginDrag(key)
+            else sceneRef.current?.trackBuilder.beginDrawerDrag(key, kind === 'fork')
+          }}
+          onDragMove={(x, y) => {
+            if (dragKindRef.current === 'platform') sceneRef.current?.platformBuilder.updateDrag(x, y)
+            else if (dragKindRef.current === 'station') sceneRef.current?.stationBuilder.updateDrag(x, y)
+            else sceneRef.current?.trackBuilder.updateDrawerDrag(x, y)
+          }}
+          onDragEnd={(commit) => {
+            if (dragKindRef.current === 'platform') sceneRef.current?.platformBuilder.endDrag(commit)
+            else if (dragKindRef.current === 'station') sceneRef.current?.stationBuilder.endDrag(commit)
+            else sceneRef.current?.trackBuilder.endDrawerDrag(commit)
+            dragKindRef.current = null
+          }}
         />
       )}
     </>

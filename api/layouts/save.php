@@ -9,12 +9,14 @@ $body = readJsonBody();
 $name = trim($body['name'] ?? '');
 $pieces = $body['pieces'] ?? null;
 $junctions = $body['junctions'] ?? null;
+$platforms = $body['platforms'] ?? [];
+$stations = $body['stations'] ?? [];
 
 if ($name === '' || mb_strlen($name) > 100) {
     respond(['error' => 'Layout name must be 1-100 characters'], 422);
 }
-if (!is_array($pieces) || !is_array($junctions)) {
-    respond(['error' => 'pieces and junctions must be arrays'], 422);
+if (!is_array($pieces) || !is_array($junctions) || !is_array($platforms) || !is_array($stations)) {
+    respond(['error' => 'pieces, junctions, platforms, and stations must be arrays'], 422);
 }
 
 $db = getDb();
@@ -44,6 +46,12 @@ try {
     }
     foreach ($junctions as $junction) {
         $insertAsset->execute([$layoutId, 'junction', (int) $junction['id'], json_encode($junction)]);
+    }
+    foreach ($platforms as $platform) {
+        $insertAsset->execute([$layoutId, 'platform', (int) $platform['id'], json_encode($platform)]);
+    }
+    foreach ($stations as $station) {
+        $insertAsset->execute([$layoutId, 'station', (int) $station['id'], json_encode($station)]);
     }
 
     $db->commit();
