@@ -59,7 +59,7 @@ const PREVIEW_COLOR = 0x5eead4
  * @param {THREE.Object3D} root Root object to dispose.
  * @returns {void}
  */
-function disposeDeep(root) {
+export function disposeDeep(root) {
   root.traverse((object) => {
     if (object.geometry) object.geometry.dispose()
     if (object.material) {

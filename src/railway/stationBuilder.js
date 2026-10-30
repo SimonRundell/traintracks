@@ -3,6 +3,7 @@ import { loadModel } from './rollingStock.js'
 import { PLATFORM_SECTION_LENGTH, PLATFORM_TOP_Y } from './platform.js'
 
 export const STATION_TYPES = [
+  { key: 'station-001', label: 'Station Building C', url: '/models/station-001.glb' },
   { key: 'station-002', label: 'Station Building A', url: '/models/station-002.glb' },
   { key: 'station-003', label: 'Station Building B', url: '/models/station-003.glb' },
 ]

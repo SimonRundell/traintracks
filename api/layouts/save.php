@@ -11,12 +11,13 @@ $pieces = $body['pieces'] ?? null;
 $junctions = $body['junctions'] ?? null;
 $platforms = $body['platforms'] ?? [];
 $stations = $body['stations'] ?? [];
+$consist = $body['consist'] ?? [];
 
 if ($name === '' || mb_strlen($name) > 100) {
     respond(['error' => 'Layout name must be 1-100 characters'], 422);
 }
-if (!is_array($pieces) || !is_array($junctions) || !is_array($platforms) || !is_array($stations)) {
-    respond(['error' => 'pieces, junctions, platforms, and stations must be arrays'], 422);
+if (!is_array($pieces) || !is_array($junctions) || !is_array($platforms) || !is_array($stations) || !is_array($consist)) {
+    respond(['error' => 'pieces, junctions, platforms, stations, and consist must be arrays'], 422);
 }
 
 $db = getDb();
@@ -53,6 +54,9 @@ try {
     foreach ($stations as $station) {
         $insertAsset->execute([$layoutId, 'station', (int) $station['id'], json_encode($station)]);
     }
+    // The consist is one ordered list for the whole layout, not several independent assets like platforms
+    // or stations — so it's a single row, ref_id unused (0), data holding the whole ordered key array.
+    $insertAsset->execute([$layoutId, 'consist', 0, json_encode(['items' => $consist])]);
 
     $db->commit();
 } catch (Exception $e) {

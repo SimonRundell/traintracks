@@ -39,3 +39,31 @@ CREATE TABLE IF NOT EXISTS layout_assets (
   CONSTRAINT fk_assets_layout FOREIGN KEY (layout_id) REFERENCES layouts(id) ON DELETE CASCADE,
   INDEX idx_layout_type (layout_id, asset_type)
 ) ENGINE=InnoDB;
+
+-- Global catalogue of available rolling stock (not per-user) — what the Train panel's loco/wagon lists are
+-- built from, and what a saved layout's consist (a layout_assets row, asset_type='consist', just an
+-- ordered array of these item_keys) resolves against when a layout loads. length_m is nullable: locos and
+-- carriages have a known real-world length, but a new wagon model can be added here without measuring it
+-- by hand first — see rollingStock.js's measureModelLength, which fills the gap from the glTF's own
+-- bounding box.
+CREATE TABLE IF NOT EXISTS rolling_stock (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  item_key VARCHAR(50) NOT NULL,
+  category ENUM('loco', 'carriage', 'wagon') NOT NULL,
+  label VARCHAR(100) NOT NULL,
+  glb_url VARCHAR(255) NOT NULL,
+  length_m DECIMAL(5,2) NULL,
+  UNIQUE KEY uniq_item_key (item_key)
+) ENGINE=InnoDB;
+
+INSERT INTO rolling_stock (item_key, category, label, glb_url, length_m) VALUES
+  ('loco-020', 'loco', 'HST Power Car', '/models/loco-020.glb', 17.46),
+  ('loco-034', 'loco', 'Class 08 Shunter', '/models/loco-034.glb', 8.92),
+  ('carriage-020', 'carriage', 'Mk3 Carriage', '/models/carriage-020.glb', 23.00),
+  ('freight-001', 'wagon', 'Freight Wagon A', '/models/freight-001.glb', NULL),
+  ('freight-003', 'wagon', 'Freight Wagon B', '/models/freight-003.glb', NULL)
+ON DUPLICATE KEY UPDATE
+  category = VALUES(category),
+  label = VALUES(label),
+  glb_url = VALUES(glb_url),
+  length_m = VALUES(length_m);

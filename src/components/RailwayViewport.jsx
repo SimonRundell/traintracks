@@ -15,10 +15,11 @@ import TrackDrawer from './TrackDrawer.jsx'
  * @param {Object} props
  * @param {import('../railway/trainController.js').TrainController} props.controller Shared throttle/direction/mode state for the running loco.
  * @param {'play' | 'lay'} props.mode Current sim mode — mirrors controller.mode, lifted to a prop so this component re-renders when it changes (the controller itself is a plain mutable object, not reactive).
+ * @param {import('../api/rollingStock.js').RollingStockItem[]} props.catalogue Forwarded to createRailwayScene — every available loco/carriage/wagon.
  * @param {(scene: ReturnType<typeof createRailwayScene> | null) => void} [props.onSceneReady] Called with the live scene handle once created, and with null just before it's disposed.
  * @returns {JSX.Element} The canvas element hosting the WebGL scene, plus the LAY-mode drawer overlay.
  */
-export default function RailwayViewport({ controller, mode, onSceneReady }) {
+export default function RailwayViewport({ controller, mode, catalogue, onSceneReady }) {
   const canvasRef = useRef(null)
   const sceneRef = useRef(null)
   const dragKindRef = useRef(null) // which builder the in-progress drag belongs to, so move/end route to the same one begin did
@@ -27,6 +28,7 @@ export default function RailwayViewport({ controller, mode, onSceneReady }) {
   useEffect(() => {
     const scene = createRailwayScene(canvasRef.current, controller, {
       onSelectionChange: (selection) => setHasSelection(Boolean(selection)),
+      catalogue,
     })
     sceneRef.current = scene
     onSceneReady?.(scene)
@@ -35,6 +37,10 @@ export default function RailwayViewport({ controller, mode, onSceneReady }) {
       onSceneReady?.(null)
       scene.dispose()
     }
+    // catalogue is deliberately excluded — it's fetched once before this component ever mounts (see
+    // App.jsx) and never changes afterwards, so re-running this effect for it would just tear down and
+    // recreate the whole scene for no reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller])
 
   return (

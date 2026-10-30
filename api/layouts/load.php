@@ -22,6 +22,7 @@ $pieces = [];
 $junctions = [];
 $platforms = [];
 $stations = [];
+$consist = [];
 foreach ($assetsStmt->fetchAll() as $row) {
     $data = json_decode($row['data'], true);
     if ($row['asset_type'] === 'track_piece') {
@@ -32,7 +33,9 @@ foreach ($assetsStmt->fetchAll() as $row) {
         $platforms[] = $data;
     } elseif ($row['asset_type'] === 'station') {
         $stations[] = $data;
+    } elseif ($row['asset_type'] === 'consist') {
+        $consist = $data['items'];
     }
 }
 
-respond(['layout' => $layout, 'pieces' => $pieces, 'junctions' => $junctions, 'platforms' => $platforms, 'stations' => $stations]);
+respond(['layout' => $layout, 'pieces' => $pieces, 'junctions' => $junctions, 'platforms' => $platforms, 'stations' => $stations, 'consist' => $consist]);

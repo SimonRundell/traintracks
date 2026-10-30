@@ -1,9 +1,9 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { buildDefaultLayout } from './defaultLayout.js'
-import { loadModel, placeAtPose } from './rollingStock.js'
-import { HST_FORMATION, computeCouplingOffsets } from './consist.js'
-import { createTrackBuilder } from './trackBuilder.js'
+import { loadModel, placeAtPose, measureModelLength, measureForwardAxis } from './rollingStock.js'
+import { computeCouplingOffsets } from './consist.js'
+import { createTrackBuilder, disposeDeep } from './trackBuilder.js'
 import { createPlatformBuilder } from './platformBuilder.js'
 import { createStationBuilder } from './stationBuilder.js'
 import { createPieceInspector } from './pieceInspector.js'
@@ -48,40 +48,54 @@ function sampleHistory(history, distance) {
 }
 
 /**
- * Loads one instance of every unit in a formation, caching by model URL so
- * repeated vehicles (e.g. two identical power cars) only fetch and parse
- * their glTF once — later instances are cheap clones that share geometry
- * and materials with the original.
+ * Loads one instance of every rolling-stock item in a consist, caching by model URL within this one call
+ * so repeated vehicles (e.g. several identical wagons) only fetch and parse their glTF once — later
+ * instances are cheap clones that share geometry and materials with the original. Each item's length comes
+ * from the catalogue when known, or is measured from the model's own bounding box when not (see
+ * api/rollingstock/list.php's lengthM and rollingStock.js's measureModelLength); every item's forward axis
+ * is always measured (see measureForwardAxis), since different models in the catalogue can be authored
+ * with their length along different local axes and there's no "known from the catalogue" shortcut for
+ * that the way there is for length. The measured axis is stashed on each clone's own userData, so
+ * placeAtPose always has the right one to hand regardless of which other vehicles are in the same consist.
  *
- * @param {import('./consist.js').ConsistUnit[]} formation Train formation to load.
- * @returns {Promise<THREE.Object3D[]>} One object per unit, in formation order.
+ * @param {import('../api/rollingStock.js').RollingStockItem[]} items Consist to load, lead unit first.
+ * @returns {Promise<{models: THREE.Object3D[], lengths: number[]}>} One model and length per item, in order.
  */
-function loadFormation(formation) {
-  const modelCache = new Map()
+function loadConsistModels(items) {
+  const modelCache = new Map() // glbUrl -> Promise<THREE.Object3D> (the loaded, un-cloned template)
   function loadCached(url) {
     if (!modelCache.has(url)) modelCache.set(url, loadModel(url))
     return modelCache.get(url)
   }
-  return Promise.all(formation.map((unit) => loadCached(unit.modelUrl).then((model) => model.clone(true))))
+  return Promise.all(
+    items.map((item) =>
+      loadCached(item.glbUrl).then((template) => {
+        const model = template.clone(true)
+        model.userData.localForward = measureForwardAxis(template)
+        return { model, length: item.lengthM ?? measureModelLength(template) }
+      }),
+    ),
+  ).then((loaded) => ({ models: loaded.map((entry) => entry.model), lengths: loaded.map((entry) => entry.length) }))
 }
 
 /**
- * Sets up the railway scene inside a canvas: an isometric orthographic
- * camera with orbit/zoom/pan controls, the oval track, and the HST
- * formation driven by a shared controller state. Starts its own render loop
- * immediately.
+ * Sets up the railway scene inside a canvas: an isometric orthographic camera with orbit/zoom/pan
+ * controls, the oval track, and a train consist the user builds from the rolling-stock catalogue, driven
+ * by a shared controller state. Starts its own render loop immediately. No train runs until loadConsist is
+ * called (see its own doc comment) — a freshly created scene starts empty.
  *
  * @param {HTMLCanvasElement} canvas Target canvas element, sized by CSS to its container.
  * @param {import('./trainController.js').TrainController} controller Shared throttle/direction state, read every frame.
  * @param {Object} [options]
  * @param {(selection: {piece: import('./trackBuilder.js').TrackPiece, end: 'start' | 'end'} | null) => void} [options.onSelectionChange] Forwarded to createTrackBuilder — called whenever the LAY-mode drawer's target end changes.
- * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>, platformBuilder: ReturnType<typeof import('./platformBuilder.js').createPlatformBuilder>, loadLayout: (data: Object) => void, getSnapshot: () => Object}} `dispose` stops the loop and frees GPU resources; `trackBuilder`/`platformBuilder` are the live handles a host UI (the track drawer) drives; `getSnapshot`/`loadLayout` save and load the whole layout (track and platforms together).
+ * @param {import('../api/rollingStock.js').RollingStockItem[]} [options.catalogue] Every available loco/carriage/wagon — fetched once by App.jsx before the scene mounts, so loadConsist and loadLayout's own consist handling can resolve saved/picked item keys without needing their own network access.
+ * @returns {{dispose: () => void, trackBuilder: ReturnType<typeof import('./trackBuilder.js').createTrackBuilder>, platformBuilder: ReturnType<typeof import('./platformBuilder.js').createPlatformBuilder>, stationBuilder: ReturnType<typeof import('./stationBuilder.js').createStationBuilder>, loadConsist: (keys: string[]) => Promise<void>, loadLayout: (data: Object) => void, getSnapshot: () => Object}} `dispose` stops the loop and frees GPU resources; `trackBuilder`/`platformBuilder`/`stationBuilder` are the live handles a host UI (the track drawer) drives; `loadConsist` rebuilds the running train from an ordered list of catalogue keys; `getSnapshot`/`loadLayout` save and load the whole layout (track, platforms, stations, and the consist together).
  */
-export function createRailwayScene(canvas, controller, { onSelectionChange } = {}) {
+export function createRailwayScene(canvas, controller, { onSelectionChange, catalogue = [] } = {}) {
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(0x202531)
 
-  const couplingOffsets = computeCouplingOffsets(HST_FORMATION)
+  const catalogueByKey = new Map(catalogue.map((item) => [item.key, item]))
 
   // Shared, mutable list of every track piece (the starting layout plus
   // anything laid in LAY mode). trackBuilder pushes/splices this directly.
@@ -157,6 +171,9 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   let cursorDistance = 0
   let maxDistance = 0
   let minDistance = 0
+  // Rebuilt by loadConsist whenever the running consist changes — empty (and so just the lead unit's own
+  // position, no backfill) until a train's actually been built.
+  let couplingOffsets = []
 
   /**
    * (Re)sets the train's position to the start of whatever's currently piece #0 (or, failing that, just
@@ -207,13 +224,41 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   }
   resetTrainState()
 
-  let units = null
+  let units = null // null until loadConsist builds a train — see its own doc comment
+  let currentConsistKeys = [] // catalogue keys behind the current `units`, in order — what getSnapshot reports and save.php stores
+  let consistRequestId = 0 // guards against a loadConsist call resolving after a newer one superseded it (or the scene was disposed) mid-flight
   let disposed = false
-  loadFormation(HST_FORMATION).then((models) => {
-    if (disposed) return
-    units = models
-    units.forEach((model) => scene.add(model))
-  })
+
+  /**
+   * Replaces the running train with one built from an ordered list of catalogue keys — the Train panel's
+   * own "apply" action (see ConsistPanel.jsx), and also how a saved layout's consist comes back on load
+   * (see loadLayout below). An empty list (or all-unknown keys) leaves the layout with no train, same as a
+   * freshly created scene.
+   *
+   * Unknown keys (a saved layout referencing an item since removed from the catalogue) are silently
+   * dropped rather than failing the whole load — better a shorter train than none at all.
+   *
+   * @param {string[]} keys
+   * @returns {Promise<void>}
+   */
+  function loadConsist(keys) {
+    const requestId = ++consistRequestId
+    const items = keys.map((key) => catalogueByKey.get(key)).filter(Boolean)
+    return loadConsistModels(items).then(({ models, lengths }) => {
+      if (disposed || requestId !== consistRequestId) {
+        // Superseded by a newer loadConsist call, or the scene was torn down, before this resolved —
+        // discard without touching live state (nothing here was ever added to the scene).
+        models.forEach((model) => disposeDeep(model))
+        return
+      }
+      if (units) units.forEach((model) => { scene.remove(model); disposeDeep(model) })
+      units = models
+      units.forEach((model) => scene.add(model))
+      couplingOffsets = computeCouplingOffsets(lengths.map((length) => ({ length })))
+      currentConsistKeys = items.map((item) => item.key)
+      resetTrainState()
+    })
+  }
 
   function resize() {
     const width = canvas.clientWidth
@@ -290,7 +335,7 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
 
         units.forEach((model, i) => {
           const pose = sampleHistory(history, cursorDistance - couplingOffsets[i])
-          placeAtPose(model, pose.point, pose.tangent, HST_FORMATION[i].reversed)
+          placeAtPose(model, pose.point, pose.tangent, model.userData.localForward)
         })
 
         // In follow mode, keep the orbit target on the lead loco. OrbitControls
@@ -333,27 +378,26 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
   }
 
   /**
-   * Builds a JSON-safe snapshot of the whole current layout — track network, platform sections, and
-   * station buildings — ready to send straight to api/layouts/save.php.
+   * Builds a JSON-safe snapshot of the whole current layout — track network, platform sections, station
+   * buildings, and the current train consist — ready to send straight to api/layouts/save.php.
    *
-   * @returns {{pieces: Object[], junctions: Object[], platforms: Object[], stations: Object[]}}
+   * @returns {{pieces: Object[], junctions: Object[], platforms: Object[], stations: Object[], consist: string[]}}
    */
   function getSnapshot() {
-    return buildLayoutSnapshot(pieces, trackBuilder.junctions, platforms, stations)
+    return { ...buildLayoutSnapshot(pieces, trackBuilder.junctions, platforms, stations), consist: currentConsistKeys }
   }
 
   /**
    * Replaces the current layout with a saved one and resets the train to its start. Combines
-   * trackBuilder.js's own loadLayout (the track/junction half) with the platform and station halves
-   * (neither belongs to trackBuilder.js, so both are handled directly here) and resetTrainState above (the
-   * train's old pathState/backState/history all refer to piece and junction objects that loadLayout is
-   * about to throw away).
+   * trackBuilder.js's own loadLayout (the track/junction half) with the platform, station, and consist
+   * halves (none of which belong to trackBuilder.js, so all three are handled directly here) and
+   * resetTrainState above (the train's old pathState/backState/history all refer to piece and junction
+   * objects that loadLayout is about to throw away).
    *
-   * Station models load asynchronously (see deserializeStations), so unlike the rest of the layout they
-   * appear a moment after everything else — the same way the running train's own rolling stock already
-   * does at startup (see loadFormation below).
+   * Station models and the consist both load asynchronously (see deserializeStations and loadConsist), so
+   * unlike the rest of the layout they appear a moment after everything else.
    *
-   * @param {Object} data As returned by api/layouts/load.php — `{pieces, junctions, platforms, stations}`.
+   * @param {Object} data As returned by api/layouts/load.php — `{pieces, junctions, platforms, stations, consist}`.
    * @returns {void}
    */
   function loadLayout(data) {
@@ -372,8 +416,9 @@ export function createRailwayScene(canvas, controller, { onSelectionChange } = {
       stations.push(...loaded)
     })
 
-    resetTrainState()
+    resetTrainState() // synchronous first pass so pathState never points at track loadLayout just replaced, even before loadConsist's own (also-resetting) async completion below
+    loadConsist(data.consist ?? [])
   }
 
-  return { dispose, trackBuilder, platformBuilder, stationBuilder, loadLayout, getSnapshot }
+  return { dispose, trackBuilder, platformBuilder, stationBuilder, loadConsist, loadLayout, getSnapshot }
 }

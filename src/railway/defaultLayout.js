@@ -2,7 +2,6 @@ import * as THREE from 'three'
 import { buildTrackMeshes } from './track.js'
 import { placeStraight, placeArc, placeCurve, STRAIGHT_LENGTHS, POINT_DIVERGE_RADIUS, POINT_DIVERGE_ANGLE } from './trackCatalogue.js'
 import { linkPieceEnds, buildJunction } from './trackGraph.js'
-import { HST_FORMATION, computeCouplingOffsets } from './consist.js'
 
 const LOOP_RADIUS_INDEX = 3 // 3rd-radius Setrack curve for both end loops
 const LOOP_CURVE_COUNT = 8 // eight 22.5 degree curves per end = one 180 degree semicircle
@@ -11,19 +10,18 @@ const LOOP_CURVE_COUNT = 8 // eight 22.5 degree curves per end = one 180 degree 
 // modest, standard-length pieces rather than the oversized ones the first attempt used.
 const LEAD_LENGTH = STRAIGHT_LENGTHS.standard // plain track before/after each station's own clear run
 
-// The station's own clear run and the siding both need to hold the whole HST formation with room to
-// spare, not just a token catalogue straight — a 25m "double straight" is shorter than even one power car
-// plus a coach, so the train would overhang both points no matter where it stopped, and platforms the
-// user places later (see platformBuilder.js) wouldn't have anywhere long enough to go. Derived from the
-// real formation length (nose to tail) rather than hand-picked, so it stays correct if the formation ever
-// changes.
-const HST_LENGTH = (() => {
-  const offsets = computeCouplingOffsets(HST_FORMATION)
-  const last = HST_FORMATION.length - 1
-  return offsets[last] + HST_FORMATION[0].length / 2 + HST_FORMATION[last].length / 2
-})()
-const STATION_SPAN = HST_LENGTH * 1.3 // clear run each station gets — 30% margin over the train
-const SIDING_LENGTH = HST_LENGTH * 1.3 // siding stub length — same margin, so the whole train can be stabled clear of the running line
+// The station's own clear run and the siding both need to hold a substantial train with room to spare, not
+// just a token catalogue straight — a 25m "double straight" is shorter than even one power car plus a
+// coach, so a train would overhang both points no matter where it stopped, and platforms the user places
+// later (see platformBuilder.js) wouldn't have anywhere long enough to go. Trains are now built by the
+// user from the rolling-stock catalogue (see ConsistPanel.jsx) rather than one fixed formation, so this is
+// a fixed assumption about "a fairly long train" (matching the old HST formation's own nose-to-tail
+// length: two power cars and two Mk3 carriages) rather than derived from any specific one — a much longer
+// user-built freight train can still overhang the clear run, same as it always could with any fixed-size
+// starter layout.
+const ASSUMED_TRAIN_LENGTH = 82 // metres
+const STATION_SPAN = ASSUMED_TRAIN_LENGTH * 1.3 // clear run each station gets — 30% margin over the assumed train
+const SIDING_LENGTH = ASSUMED_TRAIN_LENGTH * 1.3 // siding stub length — same margin, so a similarly-sized train can be stabled clear of the running line
 
 /**
  * Builds the default starter layout: an oval of the same construction as the old plain starter loop
